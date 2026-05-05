@@ -119,18 +119,11 @@ def api_health():
             'analyzer': state.analyzer is not None,
             'ml_pipeline': state.ML_AVAILABLE,
             'adk_orchestrator': state.official_adk_available,
-            'trading_engine': trading_status,
-            'scan_loop': scan_status,
-            'market_monitor': monitor_status,
+            'trading_engine': {'active': trading_status.get('active', False)},
+            'scan_loop': {'scheduler_running': scan_status.get('scheduler_running', False)},
+            'market_monitor': {'running': monitor_status.get('running', False)},
         },
-        'cache': {
-            'analysis_entries': len(state.agent_analysis_cache),
-        },
-        'system': system_metrics,
         'uptime_hours': round((time.time() - state.start_time) / 3600, 2),
-        'gemini_budget': (lambda b: b.get_status())(
-            __import__('services.gemini_budget', fromlist=['get_gemini_budget']).get_gemini_budget()
-        ),
     }), 200
 
 
