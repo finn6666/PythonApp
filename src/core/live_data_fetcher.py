@@ -11,6 +11,8 @@ STABLECOINS = {
     'USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDP', 'USDD', 'FRAX', 'GUSD',
     'LUSD', 'SUSD', 'USDK', 'USDX', 'PAX', 'USDN', 'USD1', 'C1USD', 'BUIDL',
     'USDF', 'USDTB', 'PYUSD', 'FDUSD', 'EURT', 'EURC',
+    # EUR/GBP/commodity-backed stable tokens
+    'EURCV', 'EURS', 'AGEUR', 'GYEN', 'GBPT', 'XAUT', 'PAXG',
 }
 
 
