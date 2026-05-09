@@ -310,12 +310,25 @@ class ScanLoop:
     # ─── Pipeline Steps ───────────────────────────────────────
 
     def _refresh_data(self) -> bool:
-        """Step 1: Refresh coin data from CoinMarketCap."""
+        """Step 1: Refresh coin data from configured source (exchanges or CoinGecko)."""
         try:
-            from src.core.live_data_fetcher import fetch_and_update_data
             import services.app_state as state
 
-            live_data = fetch_and_update_data()
+            data_source = os.getenv("SCAN_DATA_SOURCE", "exchanges").lower()
+
+            if data_source == "exchanges":
+                from src.core.live_data_fetcher import fetch_from_exchanges_data
+                max_coins = int(os.getenv("SCAN_EXCHANGE_MAX_COINS", "300"))
+                live_data = fetch_from_exchanges_data(max_coins=max_coins)
+                if not live_data:
+                    # Fall back to CoinGecko if exchange fetch fails
+                    logger.warning("Exchange data fetch failed — falling back to CoinGecko")
+                    from src.core.live_data_fetcher import fetch_and_update_data
+                    live_data = fetch_and_update_data()
+            else:
+                from src.core.live_data_fetcher import fetch_and_update_data
+                live_data = fetch_and_update_data()
+
             if live_data:
                 # Also fetch any pipeline-tracked symbols
                 if getattr(state, 'data_pipeline', None):
@@ -327,7 +340,7 @@ class ScanLoop:
                             except Exception:
                                 pass
                 state.analyzer.load_data()
-                logger.info(f"Data refreshed — {len(state.analyzer.coins)} coins loaded")
+                logger.info(f"Data refreshed ({data_source}) — {len(state.analyzer.coins)} coins loaded")
                 return True
             return False
         except Exception as e:

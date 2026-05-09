@@ -125,13 +125,22 @@ def _build_market_data_str(coin_data: Optional[Dict[str, Any]], symbol: str = ""
     if not coin_data:
         return "No data available."
 
+    market_cap = coin_data.get('market_cap', 0)
+    market_cap_rank = coin_data.get('market_cap_rank')
+    # Exchange-sourced coins have no CoinGecko market cap data — show N/A rather
+    # than £0 so agents don't misread it as a "zero market cap red flag".
+    if (not market_cap or market_cap == 0) and market_cap_rank is None:
+        mcap_str = "N/A (exchange-listed, CoinGecko data unavailable)"
+    else:
+        mcap_str = f"£{market_cap}"
+
     lines = [
         f"Name: {coin_data.get('name', symbol)}",
         f"Price: £{coin_data.get('price', 'N/A')}",
         f"24h: {coin_data.get('price_change_24h', 'N/A')}%",
         f"7d: {coin_data.get('price_change_7d', 'N/A')}%",
-        f"Rank: #{coin_data.get('market_cap_rank', 'N/A')}",
-        f"MCap: £{coin_data.get('market_cap', 'N/A')}",
+        f"Rank: {'#' + str(market_cap_rank) if market_cap_rank else 'N/A (exchange-listed)'}",
+        f"MCap: {mcap_str}",
         f"Vol: £{coin_data.get('volume_24h', 'N/A')}",
         f"Score: {coin_data.get('attractiveness_score', 'N/A')}/10 (scale 0-10, avg 6.5)",
     ]

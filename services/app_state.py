@@ -161,10 +161,19 @@ def run_async(coro):
 
 
 def safe_float(val):
-    """Convert string value to float (handles currency symbols)."""
+    """Convert string value to float (handles currency symbols and N/A)."""
     if isinstance(val, str):
-        return float(val.replace('£', '').replace('$', '').replace(',', ''))
-    return float(val or 0)
+        cleaned = val.replace('£', '').replace('$', '').replace(',', '').strip()
+        if not cleaned or cleaned.upper() == 'N/A':
+            return 0.0
+        try:
+            return float(cleaned)
+        except ValueError:
+            return 0.0
+    try:
+        return float(val or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def coin_to_dict(coin, include_highlights=False):
