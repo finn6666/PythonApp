@@ -511,6 +511,15 @@ class TradingEngine:
         )
         exec_result = self.approve_trade(proposal_id)
         exec_result["auto_approved"] = True
+
+        # If execution failed (e.g. slippage), reset the cooldown timer so the
+        # next candidate in the same scan can still be attempted.  A failed trade
+        # is not a real trade — don't penalise the scan for an exchange data glitch.
+        if not exec_result.get("success") and side == "buy":
+            self._last_buy_proposal_time = None
+        elif not exec_result.get("success") and side == "sell":
+            self._last_sell_proposal_time = None
+
         return exec_result
 
     # ─── Approval / Rejection ─────────────────────────────────
@@ -837,13 +846,26 @@ class TradingEngine:
             from ml.exchange_manager import get_exchange_manager
             mgr = get_exchange_manager()
             remaining = self.get_remaining_budget() if proposal.side == "buy" else None
+
+            # Fetch a fresh price for the slippage check — the price stored in
+            # the proposal can be hours old (exchange-scan data).  Using a stale
+            # price as expected_price causes false slippage failures on coins that
+            # have moved since the scan.  Pass None so execute_order fetches live.
+            fresh_expected_price: Optional[float] = None
+            try:
+                live = mgr.get_live_prices_gbp([proposal.symbol])
+                if live.get(proposal.symbol):
+                    fresh_expected_price = live[proposal.symbol]
+            except Exception:
+                pass  # fall back to no expected_price check
+
             result = mgr.execute_order(
                 symbol=proposal.symbol,
                 side=proposal.side,
                 amount_gbp=proposal.amount_gbp,
                 max_amount_gbp=remaining,
                 quantity=proposal.sell_quantity,
-                expected_price=proposal.price_at_proposal,
+                expected_price=fresh_expected_price,
                 preferred_exchange=proposal.preferred_exchange or None,
             )
             if result.get("success"):
