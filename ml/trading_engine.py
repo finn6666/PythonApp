@@ -372,34 +372,8 @@ class TradingEngine:
             # Sellability gate: ensure the position will be large enough to exit
             # via Tier 1 partial sell (33% of position by default — the smallest
             # exit we'd ever make). If even a full exit would be below the exchange
-            # minimum we'd be locked in, so reject the buy now.
-            if min_order_gbp > 0 and current_price and current_price > 0:
-                tier1_fraction = float(os.getenv("SELL_TIER1_FRACTION", "0.33"))
-                existing_qty = 0.0
-                try:
-                    from ml.portfolio_tracker import get_portfolio_tracker
-                    holding = get_portfolio_tracker().holdings.get(symbol.upper(), {})
-                    existing_qty = holding.get("quantity", 0.0)
-                except Exception:
-                    pass
-                existing_value_gbp = existing_qty * current_price
-                total_position_gbp = amount_gbp + existing_value_gbp
-                if (total_position_gbp * tier1_fraction) < min_order_gbp:
-                    min_needed_gbp = min_order_gbp / tier1_fraction
-                    logger.warning(
-                        f"{symbol}: buy rejected — tier 1 sell ({tier1_fraction*100:.0f}% = "
-                        f"£{total_position_gbp * tier1_fraction:.2f}) would be below exchange "
-                        f"min £{min_order_gbp:.2f}. Need at least £{min_needed_gbp:.2f} total."
-                    )
-                    return {
-                        "success": False,
-                        "error": (
-                            f"Position of £{total_position_gbp:.2f} would not be sellable — "
-                            f"tier 1 sell (£{total_position_gbp * tier1_fraction:.2f}) is below "
-                            f"exchange minimum £{min_order_gbp:.2f}. "
-                            f"Need at least £{min_needed_gbp:.2f} total."
-                        ),
-                    }
+            # (Tier 1 partial-sell viability check removed — tier 1 is optional
+            #  profit-taking; if the position is too small the trailing stop exits instead.)
 
         # Per-side cooldown check (buys and sells have independent cooldowns).
         # Sell automation batch-processes multiple holdings — skip cooldown for those.
