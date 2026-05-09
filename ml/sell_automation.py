@@ -90,6 +90,7 @@ class SellAutomation:
         self._unsellable_dust: set = set()
 
         self._load_state()
+        self._preload_unsellable_dust()
 
         logger.info(
             f"Sell automation: pump_capture={self.pump_capture_pct}%({self.pump_capture_fraction*100:.0f}%), "
@@ -319,17 +320,21 @@ class SellAutomation:
 
         # Log when new dust positions are discovered, and write them off in portfolio
         if len(self._unsellable_dust) > prev_dust_count:
-            logger.info(
-                f"Sell automation: {len(self._unsellable_dust)} positions below exchange "
-                f"minimum (unsellable): {', '.join(sorted(self._unsellable_dust))}"
+            new_dust = sorted(self._unsellable_dust)
+            logger.warning(
+                f"Sell automation: {len(new_dust)} positions below exchange "
+                f"minimum (unsellable): {', '.join(new_dust)}"
             )
             try:
                 from ml.portfolio_tracker import get_portfolio_tracker
-                cleaned = get_portfolio_tracker().cleanup_dust(min_value_gbp=0.50)
+                dust_min = float(os.getenv("SELL_DUST_MIN_GBP", "0.50"))
+                cleaned = get_portfolio_tracker().cleanup_dust(min_value_gbp=dust_min)
                 if cleaned:
                     logger.info(f"Portfolio dust cleanup: wrote off {', '.join(cleaned)}")
             except Exception as e:
                 logger.debug(f"Portfolio dust cleanup failed: {e}")
+            # Persist so restarts don't re-fire the warning for known dust
+            self._save_state()
 
         # Optionally re-analyse with agents — exclude unsellable dust
         if (self.enable_agent_recheck or force_agent_recheck) and holdings:
@@ -733,6 +738,7 @@ class SellAutomation:
                 "last_drawdown_recheck": self._last_drawdown_recheck,
                 "tiers_taken": {k: list(v) for k, v in self._tiers_taken.items()},
                 "tightened_trailing": self._tightened_trailing,
+                "unsellable_dust": list(self._unsellable_dust),
             }
             tmp = SELL_STATE_FILE.with_suffix(".tmp")
             with open(tmp, "w") as f:
@@ -743,6 +749,26 @@ class SellAutomation:
             tmp = SELL_STATE_FILE.with_suffix(".tmp")
             if tmp.exists():
                 tmp.unlink()
+
+    def _preload_unsellable_dust(self):
+        """Seed _unsellable_dust from persisted state and closed portfolio positions
+        so the startup log is suppressed for already-known dust."""
+        try:
+            if SELL_STATE_FILE.exists():
+                with open(SELL_STATE_FILE) as f:
+                    state = json.load(f)
+                self._unsellable_dust = set(state.get("unsellable_dust", []))
+        except Exception:
+            pass
+        # Also seed from portfolio: any closed position (qty=0) is unsellable by definition
+        try:
+            from ml.portfolio_tracker import get_portfolio_tracker
+            tracker = get_portfolio_tracker()
+            for sym, h in tracker.holdings.items():
+                if h.get("quantity", 0) <= 0:
+                    self._unsellable_dust.add(sym)
+        except Exception:
+            pass
 
     def _load_state(self):
         if not SELL_STATE_FILE.exists():
