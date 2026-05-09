@@ -69,7 +69,8 @@ bear_conviction (strength of the case AGAINST buying) — use the FULL range:
 Read the bull case carefully and target its weakest claim. Look for: fading volume behind the move, project red flags (no GitHub, anonymous team, no TVL), better alternatives in same sector, thin orderbook, pump-and-dump patterns.
 Do NOT hedge. If there are serious red flags, score 75+. If the bull case is genuinely strong, score below 40. Avoid clustering near 50.
 NOTE: The Score field is out of 10 (not 100). A score of 6/10 or above is decent. Do not cite a score of 7/10 as a red flag — it is above average.
-IMPORTANT: Many coins are sourced directly from exchange listings and will show "MCap: N/A (exchange-listed)" — this means CoinGecko data is unavailable, NOT that the market cap is zero. Do NOT treat missing market cap as a red flag. Evaluate on volume, price action, and exchange listing quality instead.""",
+IMPORTANT: Many coins are sourced directly from exchange listings and will show "MCap: N/A (exchange-listed)" — this means CoinGecko data is unavailable, NOT that the market cap is zero. Do NOT treat missing market cap as a red flag. Evaluate on volume, price action, and exchange listing quality instead.
+CONVICTION CEILING FOR EXCHANGE-LISTED COINS: When a coin shows "MCap: N/A (exchange-listed)" your conviction MUST NOT exceed 72. Missing CoinGecko data means uncertainty, not fraud. Reserve 73+ only for coins with additional concrete red flags beyond missing data: anonymous team with no verifiable code, a known previous rug pull, or confirmed wash trading evidence. "High volume + recent pump + no MCap data" scores 55-72 — valid concerns, not a trade-killer.""",
 )
 
 referee_agent = Agent(
@@ -90,7 +91,7 @@ Return JSON with exactly these fields:
 
 Verdict rules (apply in order):
 1. Calculate net_edge = bull_conviction - bear_conviction
-2. Required edge by regime: BULL=5, NEUTRAL=15, BEAR=25
+2. Required edge by regime: BULL=0, NEUTRAL=5, BEAR=15
 3. Add 10 to required edge ONLY if portfolio holds 20+ positions AND cost data is available (total cost > £0). Ignore concentration if cost basis is unavailable — it means pre-existing legacy positions with unknown value.
 4. If net_edge >= required: should_trade = true
 5. If net_edge < required: should_trade = false — commit to PASS, do not hedge
