@@ -136,7 +136,10 @@ class ExchangeManager:
                     "apiKey": key,
                     "secret": secret,
                     "password": passphrase,
-                    "options": {"defaultType": "spot"},
+                    "options": {
+                        "defaultType": "spot",
+                        "createMarketBuyOrderRequiresPrice": False,
+                    },
                 }
         elif exchange_id == "mexc":
             key = os.getenv("MEXC_API_KEY", "")
@@ -609,7 +612,8 @@ class ExchangeManager:
 
             # Place market order (with retry)
             order = self._place_order_with_retry(
-                exchange, pair, side, quantity
+                exchange, pair, side, quantity,
+                cost_in_quote=amount_in_quote if side == "buy" else 0.0,
             )
 
             # Log raw order response for debugging
@@ -667,9 +671,17 @@ class ExchangeManager:
 
     @staticmethod
     @retry(max_attempts=2, base_delay=1.5, backoff=2.0)
-    def _place_order_with_retry(exchange, pair: str, side: str, quantity: float):
+    def _place_order_with_retry(
+        exchange, pair: str, side: str, quantity: float, cost_in_quote: float = 0.0
+    ):
         """Place a market order with retry (fewer attempts — money is involved)."""
         if side == "buy":
+            # Bitget spot requires cost (amount * price) in the amount field rather
+            # than the coin quantity.  The createMarketBuyOrderRequiresPrice=False
+            # option is set at init; here we pass cost_in_quote as the amount.
+            exchange_id = getattr(exchange, "id", "")
+            if exchange_id == "bitget" and cost_in_quote:
+                return exchange.create_market_buy_order(pair, cost_in_quote)
             return exchange.create_market_buy_order(pair, quantity)
         else:
             return exchange.create_market_sell_order(pair, quantity)
@@ -737,7 +749,8 @@ class ExchangeManager:
                     quantity = balance_check["adjusted_quantity"]
 
                 order = self._place_order_with_retry(
-                    exchange, pair, side, quantity
+                    exchange, pair, side, quantity,
+                    cost_in_quote=amount_in_quote if side == "buy" else 0.0,
                 )
 
                 fee_gbp = self._extract_fee_gbp(order, fx_rate)
