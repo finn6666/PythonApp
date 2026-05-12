@@ -357,9 +357,6 @@ class MarketMonitor:
                 for a in alerts:
                     self._log_alert("momentum", a)
 
-                # Email digest if significant alerts exist
-                self._send_alert_digest(alerts)
-
             self._stats["momentum_checks"] += 1
             self._stats["last_momentum_check"] = datetime.utcnow().isoformat()
 
