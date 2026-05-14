@@ -372,6 +372,19 @@ class SellAutomation:
         within_hold_period = hold_hours < effective_min_hold
         tiers_taken = self._tiers_taken.get(symbol, set())
 
+        # Sanity check: if PnL exceeds 1,000,000% (10,000x) the price feed is
+        # almost certainly bad (wrong token, stale data, or unit mismatch).
+        # Skip all sell triggers to avoid proposing a £multi-million trade on
+        # garbage data. Stop-loss is exempt — a -50% loss is always plausible.
+        PRICE_FEED_SANITY_PCT = float(os.getenv("SELL_PRICE_FEED_SANITY_PCT", "1000000.0"))
+        if pnl_pct > PRICE_FEED_SANITY_PCT:
+            logger.warning(
+                f"{symbol}: skipping sell triggers — PnL {pnl_pct:.0f}% exceeds "
+                f"sanity limit {PRICE_FEED_SANITY_PCT:.0f}% — likely bad price feed "
+                f"(entry £{entry_price:.8f} → current £{current_price:.8f})"
+            )
+            return None
+
         # 1. Stop-loss — always fires regardless of hold period (capital protection)
         if pnl_pct <= self.stop_loss_pct:
             return {
