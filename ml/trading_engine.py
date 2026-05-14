@@ -383,6 +383,11 @@ class TradingEngine:
                 elapsed = (datetime.utcnow() - last_time).total_seconds() / 60
                 if elapsed < self.trade_cooldown_min:
                     remaining_min = self.trade_cooldown_min - elapsed
+                    logger.info(
+                        f"[Cooldown] {symbol} {'sell' if is_sell else 'buy'} skipped — "
+                        f"{remaining_min:.0f} min remaining (last={'sell' if is_sell else 'buy'} "
+                        f"{elapsed:.0f} min ago)"
+                    )
                     return {
                         "success": False,
                         "error": f"{'Sell' if is_sell else 'Buy'} cooldown active — wait {remaining_min:.0f} more minutes",
@@ -512,13 +517,16 @@ class TradingEngine:
         exec_result = self.approve_trade(proposal_id)
         exec_result["auto_approved"] = True
 
-        # If execution failed (e.g. slippage), reset the cooldown timer so the
-        # next candidate in the same scan can still be attempted.  A failed trade
-        # is not a real trade — don't penalise the scan for an exchange data glitch.
-        if not exec_result.get("success") and side == "buy":
-            self._last_buy_proposal_time = None
-        elif not exec_result.get("success") and side == "sell":
-            self._last_sell_proposal_time = None
+        # If execution failed, reset the cooldown timer so the next candidate
+        # in the same scan can still be attempted.  A failed trade is not a
+        # real trade — don't penalise the scan for an exchange data glitch.
+        if not exec_result.get("success"):
+            if side == "buy":
+                self._last_buy_proposal_time = None
+            else:
+                self._last_sell_proposal_time = None
+            # Persist the reset so it survives a service restart
+            self._save_state()
 
         return exec_result
 
@@ -847,25 +855,18 @@ class TradingEngine:
             mgr = get_exchange_manager()
             remaining = self.get_remaining_budget() if proposal.side == "buy" else None
 
-            # Fetch a fresh price for the slippage check — the price stored in
-            # the proposal can be hours old (exchange-scan data).  Using a stale
-            # price as expected_price causes false slippage failures on coins that
-            # have moved since the scan.  Pass None so execute_order fetches live.
-            fresh_expected_price: Optional[float] = None
-            try:
-                live = mgr.get_live_prices_gbp([proposal.symbol])
-                if live.get(proposal.symbol):
-                    fresh_expected_price = live[proposal.symbol]
-            except Exception:
-                pass  # fall back to no expected_price check
-
+            # Pass expected_price=None so the slippage guard is skipped for buys.
+            # Exchange-scan data can be 1+ hours old by execution time — using the
+            # stale scan price as expected_price produces false 30-40% slippage
+            # errors on coins that have simply moved since the scan. Market orders
+            # always execute at live market price regardless.
             result = mgr.execute_order(
                 symbol=proposal.symbol,
                 side=proposal.side,
                 amount_gbp=proposal.amount_gbp,
                 max_amount_gbp=remaining,
                 quantity=proposal.sell_quantity,
-                expected_price=fresh_expected_price,
+                expected_price=None,
                 preferred_exchange=proposal.preferred_exchange or None,
             )
             if result.get("success"):

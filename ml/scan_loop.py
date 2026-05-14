@@ -748,6 +748,7 @@ class ScanLoop:
                     coin_name=coin_data.get("name", ""),
                     trade_mode=trade_mode,
                     debate_data=debate_data,
+                    skip_cooldown=True,  # max_proposals cap already limits scan buys; cooldown only guards same-coin rapid re-buys
                 )
 
                 outcome = "executed" if result.get("auto_approved") else "proposed"

@@ -43,5 +43,6 @@ dev = [
 
 [dependency-groups]
 dev = [
+    "bandit>=1.9.4",
     "flake8>=7.3.0",
 ]
