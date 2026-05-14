@@ -602,6 +602,30 @@ class ExchangeManager:
             # Verify exchange balance before placing order
             balance_check = self._check_balance(exchange, exchange_id, side, pair, quantity, amount_in_quote)
             if not balance_check["ok"]:
+                if side == "sell":
+                    # Tokens may be on a different exchange than the preferred one
+                    # (e.g. a subsequent buy landed on KuCoin while the original
+                    # position was on MEXC). Try remaining exchanges before failing.
+                    logger.warning(
+                        f"Sell balance check failed on {exchange_id}: "
+                        f"{balance_check['error']} — trying other exchanges"
+                    )
+                    remaining = [
+                        eid for eid in self.get_exchanges_for_coin(symbol)
+                        if eid != exchange_id
+                    ]
+                    for fallback_id in remaining:
+                        try:
+                            fb_result = self._try_order_on_exchange(
+                                fallback_id, symbol, side, amount_gbp,
+                                max_amount_gbp=max_amount_gbp,
+                                quantity=quantity,
+                            )
+                            if fb_result.get("success"):
+                                return fb_result
+                        except Exception as fb_e:
+                            logger.error(f"Fallback sell failed on {fallback_id}: {fb_e}")
+                            continue
                 return {
                     "success": False,
                     "error": balance_check["error"],
