@@ -740,6 +740,21 @@ class ExchangeManager:
                 if side == "sell" and quantity is not None:
                     # Use explicit coin qty for sells (same reasoning as execute_order)
                     amount_in_quote = quantity * current_price
+                    # Enforce sell-side minimums — bump quantity up to meet exchange
+                    # minimum if needed.  The balance check below will reject the bump
+                    # if we don't actually hold that much on this exchange.
+                    min_qty = self._get_min_order_quantity(exchange, pair)
+                    min_cost = self._get_min_order_cost(exchange, pair)
+                    if min_qty and quantity < min_qty:
+                        logger.info(
+                            f"Bumping sell qty for {symbol} on {exchange_id}: "
+                            f"{quantity:.6f} → {min_qty * 1.02:.6f} (below exchange minimum)"
+                        )
+                        quantity = min_qty * 1.02
+                        amount_in_quote = quantity * current_price
+                    if min_cost and amount_in_quote < min_cost:
+                        quantity = (min_cost * 1.02) / current_price
+                        amount_in_quote = quantity * current_price
                 else:
                     amount_in_quote = amount_gbp * fx_rate
                     quantity = amount_in_quote / current_price
