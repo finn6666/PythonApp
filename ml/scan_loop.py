@@ -564,6 +564,25 @@ class ScanLoop:
                             "proposed": False,
                             "reason": f"Recent analysis ({age_hours:.1f}h ago) found no trade — reusing result",
                         }
+                    else:
+                        # Previous result was BUY — don't re-buy if coin already held.
+                        # The scan runs hourly; without this guard a high-scoring coin
+                        # gets re-bought every cycle, stacking positions in the same coin.
+                        try:
+                            from ml.portfolio_tracker import get_portfolio_tracker
+                            _holding = get_portfolio_tracker().holdings.get(symbol.upper(), {})
+                            if _holding.get("quantity", 0) > 0:
+                                logger.info(
+                                    f"[Scan] {symbol}: cached BUY ({age_hours:.1f}h old), "
+                                    f"coin already held — skipping re-buy"
+                                )
+                                return {
+                                    "outcome": "skipped",
+                                    "proposed": False,
+                                    "reason": f"Already held; recent BUY analysis ({age_hours:.1f}h ago) — no re-buy",
+                                }
+                        except Exception:
+                            pass
 
         # Check trading budget before spending API credits
         if engine.is_budget_exhausted():

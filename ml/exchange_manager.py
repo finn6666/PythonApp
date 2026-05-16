@@ -626,6 +626,26 @@ class ExchangeManager:
                         except Exception as fb_e:
                             logger.error(f"Fallback sell failed on {fallback_id}: {fb_e}")
                             continue
+                else:
+                    # Buy: quote balance depleted on preferred exchange (e.g. USDT
+                    # on KuCoin spent down by earlier trades).  Try other exchanges.
+                    logger.warning(
+                        f"Buy balance check failed on {exchange_id}: "
+                        f"{balance_check['error']} — trying other exchanges"
+                    )
+                    other_exchanges = self.get_exchanges_for_coin(symbol)
+                    remaining_buy = [eid for eid in other_exchanges if eid != exchange_id]
+                    for fallback_id in remaining_buy:
+                        try:
+                            fb_result = self._try_order_on_exchange(
+                                fallback_id, symbol, side, amount_gbp,
+                                max_amount_gbp=max_amount_gbp,
+                            )
+                            if fb_result.get("success"):
+                                return fb_result
+                        except Exception as fb_e:
+                            logger.error(f"Fallback buy failed on {fallback_id}: {fb_e}")
+                            continue
                 return {
                     "success": False,
                     "error": balance_check["error"],
