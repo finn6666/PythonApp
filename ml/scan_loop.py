@@ -98,6 +98,7 @@ class ScanLoop:
             "scan_id": scan_id,
             "triggered_by": triggered_by,
             "started_at": scan_start.isoformat(),
+            "regime": self._get_market_regime(),
             "coins_refreshed": 0,
             "coins_tradeable": 0,
             "coins_analysed": 0,
@@ -804,6 +805,10 @@ class ScanLoop:
         Classify current market regime from BTC 7-day performance.
         Returns 'bull', 'bear', or 'neutral'.
         Used to dynamically adjust the conviction threshold per scan.
+
+        Primary source: state.analyzer.coins (populated at startup/refresh).
+        Fallback: CoinGecko /coins/markets for bitcoin, cached to disk for 6h
+        so we don't burn rate-limit quota on every scan.
         """
         try:
             import services.app_state as state
@@ -818,6 +823,68 @@ class ScanLoop:
                         return "neutral"
         except Exception:
             pass
+
+        # Fallback: read BTC 7d change from a CoinGecko cache file (6h TTL)
+        return self._btc_regime_from_cache()
+
+    def _btc_regime_from_cache(self) -> str:
+        """Fetch BTC 7d % change from cache or CoinGecko, classify regime."""
+        cache_file = Path("data/btc_regime_cache.json")
+        cache_ttl_secs = 6 * 3600
+
+        # Try reading fresh cache
+        try:
+            if cache_file.exists():
+                with open(cache_file) as f:
+                    cached = json.load(f)
+                age = (datetime.utcnow() - datetime.fromisoformat(cached["fetched_at"])).total_seconds()
+                if age < cache_ttl_secs:
+                    pct = float(cached.get("price_change_7d") or 0)
+                    if pct > 10:
+                        return "bull"
+                    if pct < -10:
+                        return "bear"
+                    return "neutral"
+        except Exception:
+            pass
+
+        # Cache is stale or missing — fetch from CoinGecko
+        try:
+            import requests as _req
+            coingecko_key = os.getenv("COINGECKO_API_KEY", "")
+            headers = {"x-cg-demo-api-key": coingecko_key} if coingecko_key else {}
+            resp = _req.get(
+                "https://api.coingecko.com/api/v3/coins/markets",
+                params={
+                    "vs_currency": "gbp",
+                    "ids": "bitcoin",
+                    "price_change_percentage": "7d",
+                },
+                headers=headers,
+                timeout=8,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data:
+                pct = float(data[0].get("price_change_percentage_7d_in_currency") or 0)
+                try:
+                    cache_file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(cache_file, "w") as f:
+                        json.dump({
+                            "price_change_7d": round(pct, 2),
+                            "fetched_at": datetime.utcnow().isoformat(),
+                        }, f)
+                except Exception:
+                    pass
+                logger.info(f"[Regime] BTC 7d change: {pct:+.1f}% — {'bull' if pct > 10 else 'bear' if pct < -10 else 'neutral'}")
+                if pct > 10:
+                    return "bull"
+                if pct < -10:
+                    return "bear"
+                return "neutral"
+        except Exception as e:
+            logger.debug(f"[Regime] BTC CoinGecko fetch failed: {e}")
+
         return "neutral"
 
     # ─── Audit Trail ──────────────────────────────────────────

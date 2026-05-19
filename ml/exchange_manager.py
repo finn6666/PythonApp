@@ -935,6 +935,31 @@ class ExchangeManager:
 
     # ─── Balance Verification ─────────────────────────────────
 
+    def log_exchange_balances(self) -> None:
+        """
+        Fetch and log the free USDT/GBP cash balance for every configured
+        exchange.  Called once at startup (in a background thread) so the
+        journal shows available trading funds without blocking the app boot.
+        """
+        quote_currencies = ("USDT", "GBP")
+        for exchange_id in self.exchange_priority:
+            exchange = self._init_exchange(exchange_id)
+            if not exchange:
+                continue
+            try:
+                balance = exchange.fetch_balance(params={"timeout": 10000})
+                parts = []
+                for q in quote_currencies:
+                    free = balance.get(q, {}).get("free") or 0
+                    if free > 0:
+                        parts.append(f"{free:.2f} {q}")
+                if parts:
+                    logger.info(f"[Balance] {exchange_id}: {', '.join(parts)} free")
+                else:
+                    logger.info(f"[Balance] {exchange_id}: no USDT/GBP free balance")
+            except Exception as e:
+                logger.debug(f"[Balance] {exchange_id}: balance fetch skipped — {e}")
+
     def _check_balance(
         self, exchange, exchange_id: str, side: str, pair: str,
         quantity: float, amount_in_quote: float,

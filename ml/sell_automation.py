@@ -313,10 +313,21 @@ class SellAutomation:
                         f"(PnL: {pnl_pct:.1f}%, {amount_gbp:.4f})"
                     )
                 else:
+                    err = result.get('error', 'unknown error')
                     logger.warning(
-                        f"SELL{partial_label} FAILED: {symbol} -- {trigger['type']} "
-                        f"({result.get('error', 'unknown error')})"
+                        f"SELL{partial_label} FAILED: {symbol} -- {trigger['type']} ({err})"
                     )
+                    # If exchange rejected because the position value is below their
+                    # minimum order size, mark as unsellable dust so subsequent cycles
+                    # don't keep retrying futile sells.
+                    if "minimum" in err.lower() or "400100" in err:
+                        if symbol not in self._unsellable_dust:
+                            logger.warning(
+                                f"{symbol}: marking as unsellable dust — "
+                                f"position below exchange minimum order size"
+                            )
+                            self._unsellable_dust.add(symbol)
+                            self._save_state()
 
         # Log when new dust positions are discovered, and write them off in portfolio
         if len(self._unsellable_dust) > prev_dust_count:

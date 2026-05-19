@@ -147,6 +147,17 @@ def init_all():
         f"Coins: {len(analyzer.coins)}"
     )
 
+    # Log exchange cash balances in the background so the journal always
+    # shows available USDT/GBP without blocking startup.
+    def _log_balances():
+        try:
+            from ml.exchange_manager import get_exchange_manager
+            get_exchange_manager().log_exchange_balances()
+        except Exception as exc:
+            logger.debug(f"Balance logging skipped: {exc}")
+
+    threading.Thread(target=_log_balances, daemon=True, name="balance-logger").start()
+
 
 # ─── Helper functions ─────────────────────────────────────────
 
