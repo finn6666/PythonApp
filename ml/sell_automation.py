@@ -88,6 +88,8 @@ class SellAutomation:
         self._tightened_trailing: Dict[str, float] = {}
         # Symbols too small to sell — logged once then silently skipped
         self._unsellable_dust: set = set()
+        # Throttle bad-price-feed sanity warnings to once per hour per symbol
+        self._last_sanity_warn: Dict[str, str] = {}
 
         self._load_state()
         self._preload_unsellable_dust()
@@ -389,11 +391,19 @@ class SellAutomation:
         # garbage data. Stop-loss is exempt — a -50% loss is always plausible.
         PRICE_FEED_SANITY_PCT = float(os.getenv("SELL_PRICE_FEED_SANITY_PCT", "1000000.0"))
         if pnl_pct > PRICE_FEED_SANITY_PCT:
-            logger.warning(
-                f"{symbol}: skipping sell triggers — PnL {pnl_pct:.0f}% exceeds "
-                f"sanity limit {PRICE_FEED_SANITY_PCT:.0f}% — likely bad price feed "
-                f"(entry £{entry_price:.8f} → current £{current_price:.8f})"
+            now_str = datetime.now(timezone.utc).isoformat()
+            last_warn = self._last_sanity_warn.get(symbol)
+            warn_age_h = (
+                (datetime.now(timezone.utc) - datetime.fromisoformat(last_warn)).total_seconds() / 3600
+                if last_warn else 999
             )
+            if warn_age_h >= 1.0:
+                logger.warning(
+                    f"{symbol}: skipping sell triggers — PnL {pnl_pct:.0f}% exceeds "
+                    f"sanity limit {PRICE_FEED_SANITY_PCT:.0f}% — likely bad price feed "
+                    f"(entry £{entry_price:.8f} → current £{current_price:.8f})"
+                )
+                self._last_sanity_warn[symbol] = now_str
             return None
 
         # 1. Stop-loss — always fires regardless of hold period (capital protection)
