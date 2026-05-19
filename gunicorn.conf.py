@@ -24,3 +24,7 @@ max_requests_jitter = 50
 accesslog = "-"  # stdout
 errorlog = "-"   # stderr
 loglevel = "info"
+
+# gunicorn 26+ introduces a control socket at ~/.gunicorn which fails on
+# read-only or restricted home dirs; disable it explicitly.
+control_socket = ""
