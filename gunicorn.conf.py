@@ -26,5 +26,5 @@ errorlog = "-"   # stderr
 loglevel = "info"
 
 # gunicorn 26+ introduces a control socket at ~/.gunicorn which fails on
-# read-only or restricted home dirs; disable it explicitly.
-control_socket = ""
+# read-only or restricted home dirs; redirect to /tmp.
+control_socket = "/tmp/cryptoapp-gunicorn.sock"
