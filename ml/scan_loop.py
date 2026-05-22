@@ -532,11 +532,10 @@ class ScanLoop:
                 confidence = result.get("confidence", 0)
                 one_liner = result.get("one_liner", "")
 
-                # Longer pause after a rate-limit skip; normal inter-call delay otherwise.
-                # 6s between calls keeps burst rate ~10 RPM, well below the 15 RPM free-tier limit.
+                # 4s between calls keeps burst rate ~11 RPM, under the 15 RPM free-tier limit.
                 # On a rate-limit, wait 65s to land retries in a fresh RPM window (window = 60s).
                 _rate_limited = not did_pass and ("rate limit" in one_liner.lower() or "rate limited" in one_liner.lower() or "no response" in one_liner.lower())
-                time.sleep(65 if _rate_limited else 6)
+                time.sleep(65 if _rate_limited else 4)
 
                 if did_pass and confidence >= effective_threshold:
                     logger.info(

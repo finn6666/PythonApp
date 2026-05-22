@@ -773,6 +773,7 @@ class SellAutomation:
                 "tiers_taken": {k: list(v) for k, v in self._tiers_taken.items()},
                 "tightened_trailing": self._tightened_trailing,
                 "unsellable_dust": list(self._unsellable_dust),
+                "last_sanity_warn": self._last_sanity_warn,
             }
             tmp = SELL_STATE_FILE.with_suffix(".tmp")
             with open(tmp, "w") as f:
@@ -818,6 +819,7 @@ class SellAutomation:
                 k: set(v) for k, v in state.get("tiers_taken", {}).items()
             }
             self._tightened_trailing = state.get("tightened_trailing", {})
+            self._last_sanity_warn = state.get("last_sanity_warn", {})
         except Exception as e:
             logger.error(f"Failed to load sell state: {e}")
 

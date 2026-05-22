@@ -13,7 +13,7 @@ threads = 4  # 2 was too few: SSE + health poll + ticker can saturate both slots
 
 # Timeouts — agent orchestrator can take up to 120s
 timeout = 120
-graceful_timeout = 30
+graceful_timeout = 120  # must be >= timeout so debates in flight can finish cleanly
 keepalive = 2
 
 # Cap worker memory — auto-restart if it leaks beyond 512 MB
