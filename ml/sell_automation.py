@@ -18,7 +18,7 @@ import asyncio
 import json
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 

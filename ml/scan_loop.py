@@ -136,9 +136,24 @@ class ScanLoop:
             candidates = self._select_candidates(tradeable_coins)
 
             # ── Step 4: Quick screen (Tier 1 — 1 Gemini call each) ──
-            logger.info(f"[Scan {scan_id}] Step 4: Quick-screening {len(candidates)} candidates...")
-            screened_candidates = self._quick_screen_candidates(candidates, scan_id)
-            scan_result["coins_quick_screened"] = len(candidates)
+            # Skip entirely when the trading budget is already exhausted — no
+            # point spending ~25 Gemini calls per hour on coins we cannot buy.
+            try:
+                from ml.trading_engine import get_trading_engine as _get_eng
+                _buy_budget_ok = not _get_eng().is_budget_exhausted()
+            except Exception:
+                _buy_budget_ok = True
+
+            if not _buy_budget_ok:
+                logger.info(
+                    f"[Scan {scan_id}] Trading budget exhausted — "
+                    "skipping quick screen and full analysis"
+                )
+                screened_candidates = []
+            else:
+                logger.info(f"[Scan {scan_id}] Step 4: Quick-screening {len(candidates)} candidates...")
+                screened_candidates = self._quick_screen_candidates(candidates, scan_id)
+            scan_result["coins_quick_screened"] = len(candidates) if _buy_budget_ok else 0
             scan_result["coins_passed_screen"] = len(screened_candidates)
             scan_result["coins_analysed"] = len(screened_candidates)
             logger.info(
@@ -442,6 +457,20 @@ class ScanLoop:
                     f"{min(filled, len(fallback))} cached-skip coins"
                 )
                 candidates.extend(fallback[:filled])
+
+        # Pre-filter coins with no market data at all (zero market cap AND zero
+        # volume) — these are dead/errored projects that quick-screen always rejects.
+        # Filtering here avoids wasting a Gemini call on an obvious no.
+        before = len(candidates)
+        candidates = [
+            c for c in candidates
+            if c.get("market_cap", 0) > 0 or c.get("volume_24h", 0) > 0
+        ]
+        if len(candidates) < before:
+            logger.info(
+                f"[Scan] Pre-filtered {before - len(candidates)} coins with "
+                "zero market cap and volume"
+            )
 
         # Cap to max
         return candidates[: self.max_coins_per_scan]
