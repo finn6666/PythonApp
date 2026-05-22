@@ -70,19 +70,6 @@ except Exception as e:
     logger.warning(f'Scan scheduler not started: {e}')
 
 # ---------------------------------------------------------------------------
-# Start ML retraining scheduler (weekly retrain + reports)
-# ---------------------------------------------------------------------------
-try:
-    from ml.scheduler import get_ml_scheduler  # noqa: E402
-    retrain_enabled = os.environ.get('RETRAIN_ENABLED', 'true').lower() in ('1', 'true', 'yes')
-    if retrain_enabled:
-        _ml_scheduler = get_ml_scheduler()
-        _ml_scheduler.analyzer = state.analyzer
-        _ml_scheduler.start_scheduler()
-except Exception as e:
-    logger.warning(f'ML retraining scheduler not started: {e}')
-
-# ---------------------------------------------------------------------------
 # Register blueprints
 # ---------------------------------------------------------------------------
 from routes.coins import coins_bp        # noqa: E402

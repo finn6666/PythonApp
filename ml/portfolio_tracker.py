@@ -52,7 +52,6 @@ class PortfolioTracker:
         fee_gbp: float = 0.0,
         coin_name: str = "",
         trade_mode: str = "accumulate",
-        ql_state: str = "",
     ) -> Dict[str, Any]:
         """
         Record a trade execution and update holdings.
@@ -114,7 +113,6 @@ class PortfolioTracker:
                     "total_fees_gbp": fee_gbp,
                     "coin_name": coin_name,
                     "trade_mode": trade_mode,
-                    "ql_state": ql_state,  # buy-time state for reliable close-time Q-learning lookup
                 }
         elif side.lower() == "sell":
             if sym in self.holdings:

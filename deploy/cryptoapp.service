@@ -23,6 +23,9 @@ KillSignal=SIGINT
 # Memory guard for Pi 4 (4GB)
 MemoryMax=1G
 MemoryHigh=768M
+# File descriptor limit — default 1024 is too low when many concurrent async
+# Gemini API threads are in-flight (each holds an HTTP socket FD)
+LimitNOFILE=4096
 
 # Systemd hardening
 NoNewPrivileges=true

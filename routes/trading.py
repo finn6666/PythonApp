@@ -621,6 +621,7 @@ def portfolio_holdings():
 
         # Get live prices for held coins
         live_prices = {}
+        ticker_changes = {}  # sym -> 24h change % from exchange tickers
         holdings_raw = tracker.get_holdings()
         if holdings_raw:
             held_symbols = {h["symbol"] for h in holdings_raw}
@@ -630,6 +631,7 @@ def portfolio_holdings():
                 from ml.market_monitor import get_market_monitor
                 monitor = get_market_monitor()
                 live_prices.update(monitor.get_portfolio_prices())
+                ticker_changes.update(monitor.get_portfolio_price_changes())
             except Exception:
                 pass
 
@@ -640,9 +642,19 @@ def portfolio_holdings():
                         if coin.symbol.upper() not in live_prices:
                             live_prices[coin.symbol.upper()] = coin.price
 
-            # 3) Fallback: fetch from exchange for any still missing — parallel per-symbol
+            # 3) Fallback: fetch from exchange for any still missing a price.
+            # 24h changes come from the monitor cache (refreshed every 5 min).
+            # On cold start, trigger a background monitor refresh so changes are
+            # available within seconds for the next request.
+            try:
+                from ml.market_monitor import get_market_monitor
+                _mon = get_market_monitor()
+                if _mon.portfolio_cache_is_cold:
+                    _mon.trigger_portfolio_refresh_async()
+            except Exception:
+                pass
+
             missing = [h["symbol"] for h in holdings_raw if h["symbol"] not in live_prices]
-            ticker_changes = {}  # sym -> 24h change % captured from exchange tickers
             if missing:
                 try:
                     import concurrent.futures
@@ -663,7 +675,11 @@ def portfolio_holdings():
                             price = ticker.get("last") or ticker.get("close")
                             if not price:
                                 return sym, None, None
-                            change_pct = ticker.get("percentage")  # 24h % from exchange
+                            change_pct = ticker.get("percentage")
+                            if change_pct is None:
+                                open_price = ticker.get("open")
+                                if open_price and open_price > 0:
+                                    change_pct = ((price - open_price) / open_price) * 100
                             quote = pair.split("/")[1] if "/" in pair else "GBP"
                             if quote == "GBP":
                                 return sym, price, change_pct
@@ -672,10 +688,10 @@ def portfolio_holdings():
                         except Exception:
                             return sym, None, None
 
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(missing), 8)) as pool:
                         done, _ = concurrent.futures.wait(
                             {pool.submit(_fetch_one, s): s for s in missing},
-                            timeout=6,
+                            timeout=20,
                             return_when=concurrent.futures.ALL_COMPLETED,
                         )
                         for f in done:
@@ -1066,143 +1082,6 @@ def check_symbol_tradeable(symbol):
 
 
 # ========================================
-# Learning Insights
-# ========================================
-
-@trading_bp.route('/api/rl/insights')
-def rl_insights():
-    """Human-readable Q-learning insights."""
-    try:
-        from ml.q_learning import get_q_learner
-        ql = get_q_learner()
-        stats = ql.get_stats()
-        history = ql.get_outcome_history(limit=10)
-        insights = []
-
-        closed_trades = stats.get('closed_trades', stats.get('episodes', 0) // 2)
-        if closed_trades == 0:
-            insights.append("Still early days — no trades have fully closed yet so there's nothing concrete to learn from. The system will start picking up patterns once positions get sold.")
-        else:
-            insights.append(f"Learnt from {closed_trades} completed trade{'s' if closed_trades != 1 else ''} so far.")
-
-        # Exploration rate
-        eps = stats.get('epsilon', 0.3)
-        if eps > 0.2:
-            insights.append(f"Currently in exploration mode ({eps*100:.0f}% random). Still trying different things to figure out what works rather than sticking to what it knows.")
-        elif eps > 0.1:
-            insights.append(f"Starting to settle down ({eps*100:.0f}% exploration). Getting more confident about which patterns are worth buying into.")
-        else:
-            insights.append(f"Mostly running on learnt experience now ({eps*100:.0f}% exploration). Sticking with patterns that have worked before.")
-
-        # Loss memory — which coins keep underperforming (show top 3 worst)
-        losses = stats.get('loss_memory', {})
-        loss_coins = [(sym, count) for sym, count in sorted(losses.items(), key=lambda x: -x[1]) if count > 0][:3]
-        if loss_coins:
-            if len(loss_coins) == 1:
-                sym, cnt = loss_coins[0]
-                msg = (
-                    f"{sym} has lost money every time we've touched it — the system now requires a much stronger signal before buying it again."
-                    if cnt >= 3 else
-                    f"{sym} has underperformed twice. The system is treating it with more scepticism."
-                )
-                insights.append(msg)
-            else:
-                names = [s for s, _ in loss_coins]
-                coin_list = ', '.join(names[:-1]) + ' and ' + names[-1]
-                insights.append(f"{coin_list} have consistently lost money. The system is applying a buy penalty to all of them until they show a genuine reversal.")
-
-        # Best/worst known patterns
-        best = stats.get('best_state')
-        worst = stats.get('worst_state')
-        state_labels = {
-            'high': 'high gem score', 'medium': 'medium gem score', 'low': 'low gem score',
-            'bullish': 'bullish weekly trend', 'bearish': 'bearish weekly trend', 'neutral': 'flat weekly trend',
-            'micro': 'micro cap', 'small': 'small cap', 'mid': 'mid cap', 'large': 'large cap',
-        }
-        def describe_state(s):
-            parts = s.split('|')
-            if len(parts) >= 4:
-                desc = [state_labels.get(parts[0], parts[0]),
-                        state_labels.get(parts[2], parts[2]),
-                        state_labels.get(parts[3], parts[3])]
-                return ', '.join(desc)
-            return s
-
-        if best and best.get('q_buy', 0) > 0:
-            q = best['q_buy']
-            label = describe_state(best['state'])
-            strength = "very strong" if q > 0.5 else "solid" if q > 0.2 else "emerging"
-            insights.append(f"Strongest pattern ({strength} signal): {label}. Q-value is {q:.2f} — the system actively looks for these.")
-        if worst and worst.get('q_buy', 0) < -0.1:
-            q = abs(worst['q_buy'])
-            label = describe_state(worst['state'])
-            insights.append(f"Pattern to avoid: {label}. Confidence penalty of {q:.2f} applied — the system needs a very strong reason to buy these.")
-
-        # Recent outcomes
-        record = {"wins": 0, "losses": 0, "total": 0}
-        if history:
-            wins = [o for o in history if o.get('pnl_pct', 0) >= 0]
-            losses_list = [o for o in history if o.get('pnl_pct', 0) < 0]
-            record = {"wins": len(wins), "losses": len(losses_list), "total": len(history)}
-
-            # Average win / loss %
-            avg_win  = sum(o['pnl_pct'] for o in wins)       / len(wins)       if wins       else 0
-            avg_loss = sum(o['pnl_pct'] for o in losses_list) / len(losses_list) if losses_list else 0
-
-            if wins and not losses_list:
-                avg_str = f", averaging +{avg_win:.1f}% each" if len(wins) > 1 else ""
-                insights.append(f"Last {len(history)} closed trades have all been profitable{avg_str}.")
-            elif losses_list and not wins:
-                avg_str = f", averaging {avg_loss:.1f}% each" if len(losses_list) > 1 else ""
-                insights.append(f"Last {len(history)} trades all closed in the red{avg_str}. The system is tightening its criteria.")
-            else:
-                win_rate = round(len(wins) / len(history) * 100)
-                avg_parts = [f"+{avg_win:.1f}% avg win" if wins else None,
-                             f"{avg_loss:.1f}% avg loss" if losses_list else None]
-                avg_str = ' / '.join(p for p in avg_parts if p)
-                insights.append(f"Last {len(history)} trades: {len(wins)}W / {len(losses_list)}L ({win_rate}% win rate). {avg_str}.")
-
-            # Best and worst single trades from the full history
-            all_history = ql.get_outcome_history(limit=50)
-            if len(all_history) >= 3:
-                best_trade  = max(all_history, key=lambda o: o.get('pnl_pct', 0))
-                worst_trade = min(all_history, key=lambda o: o.get('pnl_pct', 0))
-                if best_trade.get('pnl_pct', 0) >= 20:
-                    insights.append(f"Best trade on record: {best_trade.get('symbol', '?')} at +{best_trade['pnl_pct']:.1f}%.")
-                if worst_trade.get('pnl_pct', 0) <= -20:
-                    insights.append(f"Worst trade on record: {worst_trade.get('symbol', '?')} at {worst_trade['pnl_pct']:.1f}%.")
-
-            # Call out notable recent trades (dedupe by symbol)
-            seen_symbols = set()
-            for o in history[:5]:
-                sym = o.get('symbol', '?')
-                if sym in seen_symbols:
-                    continue
-                seen_symbols.add(sym)
-                pnl = o.get('pnl_pct', 0)
-                if pnl >= 25:
-                    insights.append(f"{sym} was a strong win at +{pnl:.1f}%. That pattern is getting reinforced.")
-                elif 10 <= pnl < 25:
-                    insights.append(f"{sym} closed up +{pnl:.1f}%.")
-                elif pnl <= -25:
-                    insights.append(f"{sym} lost {pnl:.1f}%. The system has marked that setup as high-risk.")
-                elif -25 < pnl <= -10:
-                    insights.append(f"{sym} closed at {pnl:.1f}%.")
-
-        # Structured best/worst patterns for frontend rendering
-        patterns = {}
-        if best and best.get('q_buy', 0) > 0:
-            patterns['best'] = {'label': describe_state(best['state']), 'q': best['q_buy']}
-        if worst and worst.get('q_buy', 0) < -0.1:
-            patterns['worst'] = {'label': describe_state(worst['state']), 'q': worst['q_buy']}
-
-        return jsonify({"insights": insights, "record": record, "patterns": patterns}), 200
-    except Exception as e:
-        logger.error(f"RL insights error: {e}")
-        return jsonify({"insights": ["Couldn't load insights right now."]}), 200
-
-
-# ========================================
 # Trade Journal Routes
 # ========================================
 
@@ -1314,264 +1193,3 @@ def backtest_results():
 # ML Retraining endpoints
 # ========================================
 
-@trading_bp.route('/api/retrain/status')
-@require_trading_auth
-def retrain_status():
-    """Get ML retraining scheduler status."""
-    try:
-        from ml.scheduler import get_ml_scheduler
-        sched = get_ml_scheduler()
-        return jsonify({'success': True, **sched.get_status()}), 200
-    except Exception as e:
-        logger.error(f"Retrain status error: {e}")
-        return jsonify({'success': False, 'error': 'Failed to get retrain status'}), 500
-
-
-@trading_bp.route('/api/retrain/trigger', methods=['POST'])
-@require_trading_auth
-def retrain_trigger():
-    """Manually trigger a model retrain."""
-    try:
-        import threading
-        from ml.scheduler import get_ml_scheduler
-        sched = get_ml_scheduler()
-        threading.Thread(target=sched.weekly_retrain, daemon=True).start()
-        return jsonify({'success': True, 'message': 'Retraining started in background'}), 202
-    except Exception as e:
-        logger.error(f"Retrain trigger error: {e}")
-        return jsonify({'success': False, 'error': 'Failed to trigger retraining'}), 500
-
-
-# ========================================
-# Claude Agent Routes
-# ========================================
-
-@trading_bp.route('/api/claude/propose', methods=['POST'])
-@limiter.limit('20 per hour')
-@require_trading_auth
-def claude_propose():
-    """
-    Propose a trade from the Claude agent layer.
-    Accepts {symbol, side, reasoning, confidence} — fetches live price and
-    routes through propose_and_auto_execute() (respects BUY_AUTO_APPROVE).
-    Confidence drives allocation: 55-69% -> 40% of budget, 70%+ -> up to 100%.
-    """
-    try:
-        from ml.trading_engine import get_trading_engine, compute_allocation_pct
-        from ml.exchange_manager import get_exchange_manager
-        engine = get_trading_engine()
-
-        data = request.json
-        if not data:
-            return jsonify({"error": "Request body must be JSON"}), 400
-
-        # ── Validate required fields ──
-        for field_name in ('symbol', 'side', 'reasoning', 'confidence'):
-            if field_name not in data:
-                return jsonify({"error": f"Missing field: {field_name}"}), 400
-
-        symbol = str(data['symbol']).upper().strip()
-        if not symbol or len(symbol) > 20:
-            return jsonify({"error": "Invalid symbol"}), 400
-
-        side = str(data['side']).lower().strip()
-        if side not in ('buy', 'sell'):
-            return jsonify({"error": "side must be 'buy' or 'sell'"}), 400
-
-        reasoning = str(data['reasoning']).strip()
-        if not reasoning:
-            return jsonify({"error": "reasoning is required"}), 400
-
-        try:
-            confidence = int(data['confidence'])
-        except (ValueError, TypeError):
-            return jsonify({"error": "confidence must be an integer"}), 400
-        if not 0 <= confidence <= 100:
-            return jsonify({"error": "confidence must be 0-100"}), 400
-
-        # ── Safety: require minimum conviction for buys ──
-        if side == 'buy' and confidence < 55:
-            return jsonify({
-                "success": False,
-                "error": f"Confidence {confidence}% is below minimum threshold (55%) for buys",
-            }), 400
-
-        if engine.kill_switch:
-            return jsonify({"success": False, "error": "Trading is halted (kill switch active)"}), 400
-
-        # ── Fetch live price from exchange ──
-        mgr = get_exchange_manager()
-        current_price = None
-        try:
-            best = mgr.find_best_pair(symbol)
-            if best:
-                exchange_id, pair = best
-                exchange = mgr.get_exchange(exchange_id)
-                if exchange:
-                    ticker = mgr._fetch_ticker_with_retry(exchange, pair)
-                    raw_price = ticker.get("last") or ticker.get("close")
-                    if raw_price:
-                        quote = pair.split("/")[1] if "/" in pair else "GBP"
-                        if quote == "GBP":
-                            current_price = float(raw_price)
-                        else:
-                            fx = mgr._get_fx_rate("GBP", quote, exchange)
-                            if fx:
-                                current_price = float(raw_price) / fx
-        except Exception as e:
-            logger.warning(f"Claude propose — price fetch failed for {symbol}: {e}")
-
-        if not current_price or current_price <= 0:
-            return jsonify({"error": f"Could not fetch live price for {symbol}"}), 400
-
-        # ── Calculate amount based on confidence and remaining budget ──
-        remaining = engine.get_remaining_budget()
-        if side == 'buy':
-            alloc_pct = compute_allocation_pct(confidence, 0, {"symbol": symbol})
-            amount_gbp = round(remaining * (alloc_pct / 100), 2)
-        else:
-            # Sells: use sell_quantity from holdings if available
-            sell_qty = data.get('sell_quantity')
-            amount_gbp = round(current_price * float(sell_qty), 2) if sell_qty else round(remaining * 0.5, 2)
-
-        # For sells, look up the exchange where tokens are held
-        preferred_exchange = ""
-        if side == "sell":
-            try:
-                from ml.portfolio_tracker import get_portfolio_tracker
-                holding = get_portfolio_tracker().holdings.get(symbol.upper(), {})
-                preferred_exchange = holding.get("exchange", "")
-            except Exception:
-                pass
-
-        result = engine.propose_and_auto_execute(
-            symbol=symbol,
-            side=side,
-            amount_gbp=amount_gbp,
-            current_price=current_price,
-            reason=reasoning[:500],
-            confidence=confidence,
-            recommendation="BUY" if side == "buy" else "SELL",
-            coin_name=data.get("coin_name", ""),
-            sell_quantity=data.get("sell_quantity"),
-            preferred_exchange=preferred_exchange,
-        )
-        return jsonify(result), 200 if result.get("success") else 400
-
-    except Exception as e:
-        logger.error(f"Claude propose error: {e}")
-        return jsonify({"error": "Failed to create Claude trade proposal"}), 500
-
-
-@trading_bp.route('/api/claude/context')
-@require_trading_auth
-def claude_context():
-    """
-    Compact single-call context snapshot for the Claude agent.
-    Returns portfolio holdings, pending proposals, budget, market conditions,
-    and recent activity — everything needed for a portfolio review in one request.
-    """
-    ctx = {}
-
-    # ── Portfolio holdings with P&L ──
-    try:
-        from ml.portfolio_tracker import get_portfolio_tracker
-        tracker = get_portfolio_tracker()
-        live_prices = {}
-        if state.analyzer:
-            for coin in state.analyzer.coins:
-                if coin.price:
-                    live_prices[coin.symbol.upper()] = coin.price
-        holdings = tracker.get_holdings(live_prices)
-        summary = tracker.get_total_value(live_prices)
-        # Split holdings into priced (actionable) and unpriced (blind positions).
-        # Sending 20+ unpriced holdings as full objects to the agent wastes tokens
-        # and drowns out the actionable holdings in the analysis.
-        priced_holdings = []
-        unpriced_symbols = []
-        for h in holdings:
-            if h.get('current_price'):
-                priced_holdings.append({
-                    'symbol': h['symbol'],
-                    'coin_name': h.get('coin_name', ''),
-                    'quantity': h.get('quantity'),
-                    'avg_entry_price': h.get('avg_entry_price'),
-                    'current_price': h.get('current_price'),
-                    'current_value_gbp': h.get('current_value_gbp'),
-                    'unrealised_pnl_pct': h.get('unrealised_pnl_pct'),
-                    'unrealised_pnl_gbp': h.get('unrealised_pnl_gbp'),
-                    'first_buy': h.get('first_buy'),
-                    'price_change_24h': h.get('price_change_24h'),
-                })
-            else:
-                unpriced_symbols.append(h['symbol'])
-        ctx['holdings'] = priced_holdings
-        # Compact summary so the agent knows how many positions can't be priced.
-        # These are likely delisted/renamed on Kraken or absent from the CMC feed.
-        if unpriced_symbols:
-            ctx['unpriced_holdings'] = {
-                'count': len(unpriced_symbols),
-                'symbols': unpriced_symbols,
-                'note': 'No live price available — may be delisted or missing from CMC feed',
-            }
-        ctx['portfolio_summary'] = summary
-    except Exception as e:
-        logger.warning(f"Claude context — portfolio error: {e}")
-        ctx['holdings'] = []
-        ctx['portfolio_summary'] = {}
-
-    # ── Trading engine: budget + kill switch + pending proposals ──
-    try:
-        from ml.trading_engine import get_trading_engine
-        engine = get_trading_engine()
-        status = engine.get_status()
-        ctx['budget'] = {
-            'daily_budget_gbp': status.get('daily_budget_gbp'),
-            'spent_today_gbp': status.get('spent_today_gbp'),
-            'remaining_gbp': status.get('remaining_today_gbp'),
-        }
-        ctx['kill_switch'] = not status.get('active', True)
-        ctx['pending_proposals'] = engine.get_pending_proposals()
-    except Exception as e:
-        logger.warning(f"Claude context — trading error: {e}")
-        ctx['budget'] = {}
-        ctx['kill_switch'] = False
-        ctx['pending_proposals'] = []
-
-    # ── Market conditions (derived from analyzer coin data) ──
-    try:
-        all_coins = state.analyzer.get_all_coins() if state.analyzer else []
-        if all_coins:
-            total = len(all_coins)
-            avg_change = sum(c.price_change_24h or 0 for c in all_coins) / max(total, 1)
-            gainers = sum(1 for c in all_coins if (c.price_change_24h or 0) > 5)
-            losers = sum(1 for c in all_coins if (c.price_change_24h or 0) < -5)
-            ctx['market'] = {
-                'avg_change_24h': round(avg_change, 2),
-                'gainers_over_5pct': gainers,
-                'losers_over_5pct': losers,
-                'total_coins_tracked': total,
-            }
-        else:
-            ctx['market'] = {}
-    except Exception as e:
-        logger.warning(f"Claude context — market error: {e}")
-        ctx['market'] = {}
-
-    # ── Recent activity (last 10 audit trail entries) ──
-    try:
-        from ml.scan_loop import get_scan_loop
-        scanner = get_scan_loop()
-        scan_status = scanner.get_status()
-        ctx['scan'] = {
-            'last_scan': scan_status.get('last_scan'),
-            'next_scan': scan_status.get('next_scan'),
-            'scan_enabled': scan_status.get('enabled'),
-        }
-        ctx['recent_activity'] = scanner.get_audit_trail(limit=10)
-    except Exception as e:
-        logger.warning(f"Claude context — scan error: {e}")
-        ctx['scan'] = {}
-        ctx['recent_activity'] = []
-
-    return jsonify(ctx), 200

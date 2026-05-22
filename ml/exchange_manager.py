@@ -45,7 +45,9 @@ class ExchangeManager:
         self._pairs: Dict[str, set] = {}  # exchange_id → set of "BASE/QUOTE" pairs
         self._coin_exchange_map: Dict[str, List[str]] = {}  # symbol → [exchange_ids]
         self._fx_cache: Dict[str, Tuple[float, float]] = {}  # FX rate cache: key → (rate, fetched_at)
+        self._min_order_cache: Dict[str, Tuple[float, float]] = {}  # symbol → (min_gbp, fetched_at)
         self._pairs_loaded_at: float = 0.0  # epoch time of last in-memory pairs load
+        self._exchange_lock = __import__('threading').Lock()  # guards _init_exchange
 
         # Exchange priority from env (comma-separated)
         priority_str = os.getenv("EXCHANGE_PRIORITY", "kraken")
@@ -63,35 +65,49 @@ class ExchangeManager:
         if exchange_id in self._exchanges:
             return self._exchanges[exchange_id]
 
-        try:
-            import ccxt
-        except ImportError:
-            logger.error("ccxt not installed — run: pip install ccxt")
-            return None
+        with self._exchange_lock:
+            # Double-check after acquiring lock
+            if exchange_id in self._exchanges:
+                return self._exchanges[exchange_id]
 
-        config = self._get_exchange_config(exchange_id)
-        if not config:
-            logger.warning(f"No API keys configured for {exchange_id}")
-            return None
-
-        try:
-            exchange_class = getattr(ccxt, exchange_id, None)
-            if exchange_class is None:
-                logger.error(f"Unknown exchange: {exchange_id}")
+            try:
+                import ccxt
+            except ImportError:
+                logger.error("ccxt not installed — run: pip install ccxt")
                 return None
 
-            exchange = exchange_class({
-                **config,
-                "enableRateLimit": True,
-            })
-            self._load_markets_with_retry(exchange, exchange_id)
-            self._exchanges[exchange_id] = exchange
-            logger.info(f"{exchange_id} connected — {len(exchange.markets)} markets")
-            return exchange
-        except Exception as e:
-            logger.error(f"Failed to connect {exchange_id}: {e}")
-            alert_exchange_down(exchange_id, str(e))
-            return None
+            config = self._get_exchange_config(exchange_id)
+            if not config:
+                logger.warning(f"No API keys configured for {exchange_id}")
+                return None
+
+            try:
+                exchange_class = getattr(ccxt, exchange_id, None)
+                if exchange_class is None:
+                    logger.error(f"Unknown exchange: {exchange_id}")
+                    return None
+
+                import requests
+                from requests.adapters import HTTPAdapter
+
+                session = requests.Session()
+                adapter = HTTPAdapter(pool_connections=4, pool_maxsize=20)
+                session.mount("https://", adapter)
+                session.mount("http://", adapter)
+
+                exchange = exchange_class({
+                    **config,
+                    "enableRateLimit": True,
+                    "session": session,
+                })
+                self._load_markets_with_retry(exchange, exchange_id)
+                self._exchanges[exchange_id] = exchange
+                logger.info(f"{exchange_id} connected — {len(exchange.markets)} markets")
+                return exchange
+            except Exception as e:
+                logger.error(f"Failed to connect {exchange_id}: {e}")
+                alert_exchange_down(exchange_id, str(e))
+                return None
 
     @staticmethod
     @retry(max_attempts=3, base_delay=2.0, backoff=2.0)
@@ -121,7 +137,10 @@ class ExchangeManager:
                     "apiKey": key,
                     "secret": secret,
                     "password": passphrase,
-                    "options": {"defaultType": "spot"},
+                    "options": {
+                        "defaultType": "spot",
+                        "createMarketBuyOrderRequiresPrice": False,
+                    },
                 }
         elif exchange_id == "mexc":
             key = os.getenv("MEXC_API_KEY", "")
@@ -532,10 +551,23 @@ class ExchangeManager:
 
             if side == "sell" and quantity is not None:
                 # For sells with explicit coin qty: use it directly.
-                # Do NOT apply amount→qty reconversion or min-order bumping —
-                # those use the approximate GBP value which can diverge from the
-                # live exchange price and overshoot what we actually hold.
                 amount_in_quote = quantity * current_price
+
+                # Enforce sell-side minimums on the primary exchange — bump qty
+                # up to meet the exchange minimum if we hold enough.  The balance
+                # check below will reject any overshoot we can't cover.
+                min_qty = self._get_min_order_quantity(exchange, pair)
+                min_cost = self._get_min_order_cost(exchange, pair)
+                if min_qty and quantity < min_qty:
+                    logger.info(
+                        f"Bumping sell qty for {symbol} on {exchange_id}: "
+                        f"{quantity:.6f} → {min_qty * 1.02:.6f} (below exchange minimum)"
+                    )
+                    quantity = min_qty * 1.02
+                    amount_in_quote = quantity * current_price
+                if min_cost and amount_in_quote < min_cost:
+                    quantity = (min_cost * 1.02) / current_price
+                    amount_in_quote = quantity * current_price
             else:
                 # For buys (or legacy sells without explicit qty): derive from GBP.
                 amount_in_quote = amount_gbp * fx_rate
@@ -584,6 +616,50 @@ class ExchangeManager:
             # Verify exchange balance before placing order
             balance_check = self._check_balance(exchange, exchange_id, side, pair, quantity, amount_in_quote)
             if not balance_check["ok"]:
+                if side == "sell":
+                    # Tokens may be on a different exchange than the preferred one
+                    # (e.g. a subsequent buy landed on KuCoin while the original
+                    # position was on MEXC). Try remaining exchanges before failing.
+                    logger.warning(
+                        f"Sell balance check failed on {exchange_id}: "
+                        f"{balance_check['error']} — trying other exchanges"
+                    )
+                    remaining = [
+                        eid for eid in self.get_exchanges_for_coin(symbol)
+                        if eid != exchange_id
+                    ]
+                    for fallback_id in remaining:
+                        try:
+                            fb_result = self._try_order_on_exchange(
+                                fallback_id, symbol, side, amount_gbp,
+                                max_amount_gbp=max_amount_gbp,
+                                quantity=quantity,
+                            )
+                            if fb_result.get("success"):
+                                return fb_result
+                        except Exception as fb_e:
+                            logger.error(f"Fallback sell failed on {fallback_id}: {fb_e}")
+                            continue
+                else:
+                    # Buy: quote balance depleted on preferred exchange (e.g. USDT
+                    # on KuCoin spent down by earlier trades).  Try other exchanges.
+                    logger.warning(
+                        f"Buy balance check failed on {exchange_id}: "
+                        f"{balance_check['error']} — trying other exchanges"
+                    )
+                    other_exchanges = self.get_exchanges_for_coin(symbol)
+                    remaining_buy = [eid for eid in other_exchanges if eid != exchange_id]
+                    for fallback_id in remaining_buy:
+                        try:
+                            fb_result = self._try_order_on_exchange(
+                                fallback_id, symbol, side, amount_gbp,
+                                max_amount_gbp=max_amount_gbp,
+                            )
+                            if fb_result.get("success"):
+                                return fb_result
+                        except Exception as fb_e:
+                            logger.error(f"Fallback buy failed on {fallback_id}: {fb_e}")
+                            continue
                 return {
                     "success": False,
                     "error": balance_check["error"],
@@ -594,7 +670,8 @@ class ExchangeManager:
 
             # Place market order (with retry)
             order = self._place_order_with_retry(
-                exchange, pair, side, quantity
+                exchange, pair, side, quantity,
+                cost_in_quote=amount_in_quote if side == "buy" else 0.0,
             )
 
             # Log raw order response for debugging
@@ -645,16 +722,24 @@ class ExchangeManager:
             return {"success": False, "error": str(e)}
 
     @staticmethod
-    @retry(max_attempts=3, base_delay=1.0, backoff=2.0)
+    @retry(max_attempts=3, base_delay=1.0, backoff=2.0, warn_on_retry=False)
     def _fetch_ticker_with_retry(exchange, pair: str):
         """Fetch ticker with retry on transient network errors."""
-        return exchange.fetch_ticker(pair)
+        return exchange.fetch_ticker(pair, params={"timeout": 5000})
 
     @staticmethod
     @retry(max_attempts=2, base_delay=1.5, backoff=2.0)
-    def _place_order_with_retry(exchange, pair: str, side: str, quantity: float):
+    def _place_order_with_retry(
+        exchange, pair: str, side: str, quantity: float, cost_in_quote: float = 0.0
+    ):
         """Place a market order with retry (fewer attempts — money is involved)."""
         if side == "buy":
+            # Bitget spot requires cost (amount * price) in the amount field rather
+            # than the coin quantity.  The createMarketBuyOrderRequiresPrice=False
+            # option is set at init; here we pass cost_in_quote as the amount.
+            exchange_id = getattr(exchange, "id", "")
+            if exchange_id == "bitget" and cost_in_quote:
+                return exchange.create_market_buy_order(pair, cost_in_quote)
             return exchange.create_market_buy_order(pair, quantity)
         else:
             return exchange.create_market_sell_order(pair, quantity)
@@ -689,6 +774,21 @@ class ExchangeManager:
                 if side == "sell" and quantity is not None:
                     # Use explicit coin qty for sells (same reasoning as execute_order)
                     amount_in_quote = quantity * current_price
+                    # Enforce sell-side minimums — bump quantity up to meet exchange
+                    # minimum if needed.  The balance check below will reject the bump
+                    # if we don't actually hold that much on this exchange.
+                    min_qty = self._get_min_order_quantity(exchange, pair)
+                    min_cost = self._get_min_order_cost(exchange, pair)
+                    if min_qty and quantity < min_qty:
+                        logger.info(
+                            f"Bumping sell qty for {symbol} on {exchange_id}: "
+                            f"{quantity:.6f} → {min_qty * 1.02:.6f} (below exchange minimum)"
+                        )
+                        quantity = min_qty * 1.02
+                        amount_in_quote = quantity * current_price
+                    if min_cost and amount_in_quote < min_cost:
+                        quantity = (min_cost * 1.02) / current_price
+                        amount_in_quote = quantity * current_price
                 else:
                     amount_in_quote = amount_gbp * fx_rate
                     quantity = amount_in_quote / current_price
@@ -722,7 +822,8 @@ class ExchangeManager:
                     quantity = balance_check["adjusted_quantity"]
 
                 order = self._place_order_with_retry(
-                    exchange, pair, side, quantity
+                    exchange, pair, side, quantity,
+                    cost_in_quote=amount_in_quote if side == "buy" else 0.0,
                 )
 
                 fee_gbp = self._extract_fee_gbp(order, fx_rate)
@@ -834,6 +935,31 @@ class ExchangeManager:
         return None
 
     # ─── Balance Verification ─────────────────────────────────
+
+    def log_exchange_balances(self) -> None:
+        """
+        Fetch and log the free USDT/GBP cash balance for every configured
+        exchange.  Called once at startup (in a background thread) so the
+        journal shows available trading funds without blocking the app boot.
+        """
+        quote_currencies = ("USDT", "GBP")
+        for exchange_id in self.exchange_priority:
+            exchange = self._init_exchange(exchange_id)
+            if not exchange:
+                continue
+            try:
+                balance = exchange.fetch_balance(params={"timeout": 10000})
+                parts = []
+                for q in quote_currencies:
+                    free = balance.get(q, {}).get("free") or 0
+                    if free > 0:
+                        parts.append(f"{free:.2f} {q}")
+                if parts:
+                    logger.info(f"[Balance] {exchange_id}: {', '.join(parts)} free")
+                else:
+                    logger.info(f"[Balance] {exchange_id}: no USDT/GBP free balance")
+            except Exception as e:
+                logger.debug(f"[Balance] {exchange_id}: balance fetch skipped — {e}")
 
     def _check_balance(
         self, exchange, exchange_id: str, side: str, pair: str,
@@ -1013,7 +1139,15 @@ class ExchangeManager:
         Get the minimum order size in GBP for a symbol.
         Checks both quantity-based and cost-based minimums.
         Returns the minimum GBP needed to place an order, or 0 if unknown.
+        Results are cached for 30 minutes to avoid repeated ticker fetches.
         """
+        import time
+        cached = self._min_order_cache.get(symbol)
+        if cached:
+            min_gbp, fetched_at = cached
+            if time.time() - fetched_at < 1800:  # 30-min TTL
+                return min_gbp
+
         result = self.find_best_pair(symbol)
         if not result:
             return 0
@@ -1047,14 +1181,23 @@ class ExchangeManager:
             if min_gbp > 0:
                 min_gbp *= 1.05  # 5% buffer
 
-            return round(min_gbp, 2)
+            min_gbp = round(min_gbp, 2)
+            self._min_order_cache[symbol] = (min_gbp, time.time())
+            return min_gbp
         except Exception as e:
             logger.warning(f"Could not determine min order for {symbol}: {e}")
             return 0
 
     def get_live_prices_gbp(self, symbols: List[str]) -> Dict[str, float]:
         """Fetch current GBP prices for a list of symbols from exchanges."""
-        prices = {}
+        return {sym: data["price"] for sym, data in self.get_live_prices_with_changes_gbp(symbols).items()}
+
+    def get_live_prices_with_changes_gbp(self, symbols: List[str]) -> Dict[str, Dict]:
+        """Fetch current GBP prices and 24h change % for a list of symbols.
+
+        Returns {symbol: {"price": float, "change_24h": float|None}}
+        """
+        results = {}
         for sym in symbols:
             try:
                 result = self.find_best_pair(sym)
@@ -1068,16 +1211,21 @@ class ExchangeManager:
                 price = ticker.get("last") or ticker.get("close")
                 if not price:
                     continue
+                change_24h = ticker.get("percentage")
+                if change_24h is None:
+                    open_price = ticker.get("open")
+                    if open_price and open_price > 0:
+                        change_24h = ((price - open_price) / open_price) * 100
                 quote = pair.split("/")[1] if "/" in pair else "GBP"
-                if quote == "GBP":
-                    prices[sym.upper()] = price
-                else:
+                if quote != "GBP":
                     fx_rate = self._get_fx_rate("GBP", quote, exchange)
-                    if fx_rate:
-                        prices[sym.upper()] = price / fx_rate
+                    if not fx_rate:
+                        continue
+                    price = price / fx_rate
+                results[sym.upper()] = {"price": price, "change_24h": change_24h}
             except Exception as e:
-                logger.debug(f"Could not fetch price for {sym}: {e}")
-        return prices
+                logger.debug(f"Could not fetch price/change for {sym}: {e}")
+        return results
 
     def get_status(self) -> Dict[str, Any]:
         """Get connectivity and configuration status for all exchanges."""

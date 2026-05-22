@@ -372,34 +372,8 @@ class TradingEngine:
             # Sellability gate: ensure the position will be large enough to exit
             # via Tier 1 partial sell (33% of position by default — the smallest
             # exit we'd ever make). If even a full exit would be below the exchange
-            # minimum we'd be locked in, so reject the buy now.
-            if min_order_gbp > 0 and current_price and current_price > 0:
-                tier1_fraction = float(os.getenv("SELL_TIER1_FRACTION", "0.33"))
-                existing_qty = 0.0
-                try:
-                    from ml.portfolio_tracker import get_portfolio_tracker
-                    holding = get_portfolio_tracker().holdings.get(symbol.upper(), {})
-                    existing_qty = holding.get("quantity", 0.0)
-                except Exception:
-                    pass
-                existing_value_gbp = existing_qty * current_price
-                total_position_gbp = amount_gbp + existing_value_gbp
-                if (total_position_gbp * tier1_fraction) < min_order_gbp:
-                    min_needed_gbp = min_order_gbp / tier1_fraction
-                    logger.warning(
-                        f"{symbol}: buy rejected — tier 1 sell ({tier1_fraction*100:.0f}% = "
-                        f"£{total_position_gbp * tier1_fraction:.2f}) would be below exchange "
-                        f"min £{min_order_gbp:.2f}. Need at least £{min_needed_gbp:.2f} total."
-                    )
-                    return {
-                        "success": False,
-                        "error": (
-                            f"Position of £{total_position_gbp:.2f} would not be sellable — "
-                            f"tier 1 sell (£{total_position_gbp * tier1_fraction:.2f}) is below "
-                            f"exchange minimum £{min_order_gbp:.2f}. "
-                            f"Need at least £{min_needed_gbp:.2f} total."
-                        ),
-                    }
+            # (Tier 1 partial-sell viability check removed — tier 1 is optional
+            #  profit-taking; if the position is too small the trailing stop exits instead.)
 
         # Per-side cooldown check (buys and sells have independent cooldowns).
         # Sell automation batch-processes multiple holdings — skip cooldown for those.
@@ -409,6 +383,11 @@ class TradingEngine:
                 elapsed = (datetime.utcnow() - last_time).total_seconds() / 60
                 if elapsed < self.trade_cooldown_min:
                     remaining_min = self.trade_cooldown_min - elapsed
+                    logger.info(
+                        f"[Cooldown] {symbol} {'sell' if is_sell else 'buy'} skipped — "
+                        f"{remaining_min:.0f} min remaining (last={'sell' if is_sell else 'buy'} "
+                        f"{elapsed:.0f} min ago)"
+                    )
                     return {
                         "success": False,
                         "error": f"{'Sell' if is_sell else 'Buy'} cooldown active — wait {remaining_min:.0f} more minutes",
@@ -457,9 +436,11 @@ class TradingEngine:
         budget.trades_proposed += 1
 
         # Send approval email only when manual approval is needed.
+        # Sent in a background thread so SMTP handshake doesn't block the trading lock.
         email_sent = False
         if not self._should_auto_approve(side, amount_gbp, trigger_type):
-            email_sent = self._send_approval_email(proposal)
+            threading.Thread(target=self._send_approval_email, args=(proposal,), daemon=True).start()
+            email_sent = True
 
         self._save_state()
 
@@ -537,6 +518,18 @@ class TradingEngine:
         )
         exec_result = self.approve_trade(proposal_id)
         exec_result["auto_approved"] = True
+
+        # If execution failed, reset the cooldown timer so the next candidate
+        # in the same scan can still be attempted.  A failed trade is not a
+        # real trade — don't penalise the scan for an exchange data glitch.
+        if not exec_result.get("success"):
+            if side == "buy":
+                self._last_buy_proposal_time = None
+            else:
+                self._last_sell_proposal_time = None
+            # Persist the reset so it survives a service restart
+            self._save_state()
+
         return exec_result
 
     # ─── Approval / Rejection ─────────────────────────────────
@@ -745,12 +738,8 @@ class TradingEngine:
             # Auto-record to portfolio tracker
             self._record_to_portfolio(proposal, exchange_used, fee_gbp=fee_gbp)
 
-            # Send confirmation email
-            if not self._send_execution_email(proposal):
-                logger.warning(
-                    f"Execution email not sent for {proposal.side.upper()} {proposal.symbol} "
-                    f"— check SMTP config or logs above"
-                )
+            # Send confirmation email in background — SMTP latency must not block the trading lock.
+            threading.Thread(target=self._send_execution_email, args=(proposal,), daemon=True).start()
 
             logger.info(
                 f"TRADE EXECUTED: {proposal.side.upper()} {(proposal.quantity or 0):.6f} "
@@ -822,7 +811,7 @@ class TradingEngine:
             })
 
             # Notify by email so the user knows about the failure
-            self._send_failure_email(proposal, str(e))
+            threading.Thread(target=self._send_failure_email, args=(proposal, str(e)), daemon=True).start()
 
             return {"success": False, "error": str(e)}
 
@@ -863,13 +852,19 @@ class TradingEngine:
             from ml.exchange_manager import get_exchange_manager
             mgr = get_exchange_manager()
             remaining = self.get_remaining_budget() if proposal.side == "buy" else None
+
+            # Pass expected_price=None so the slippage guard is skipped for buys.
+            # Exchange-scan data can be 1+ hours old by execution time — using the
+            # stale scan price as expected_price produces false 30-40% slippage
+            # errors on coins that have simply moved since the scan. Market orders
+            # always execute at live market price regardless.
             result = mgr.execute_order(
                 symbol=proposal.symbol,
                 side=proposal.side,
                 amount_gbp=proposal.amount_gbp,
                 max_amount_gbp=remaining,
                 quantity=proposal.sell_quantity,
-                expected_price=proposal.price_at_proposal,
+                expected_price=None,
                 preferred_exchange=proposal.preferred_exchange or None,
             )
             if result.get("success"):
@@ -885,11 +880,21 @@ class TradingEngine:
             # "No trading pair found" error.
             if proposal.side == "sell":
                 raise RuntimeError(error or "Sell failed on all available exchanges")
+            # For buys: if ExchangeManager found a pair but failed to execute,
+            # don't fall through to legacy Kraken — it will just fail again with a
+            # misleading "No trading pair found" error. Fail fast and log clearly.
+            if result:
+                err_msg = result.get("error", "Unknown execution failure")
+                logger.warning(
+                    f"[Trade] {proposal.symbol}: ExchangeManager execution failed "
+                    f"({err_msg}) — not falling through to legacy path"
+                )
+                raise RuntimeError(err_msg)
             return None
         except RuntimeError:
             raise  # re-raise our own insufficient-funds errors
         except Exception as e:
-            logger.debug(f"Exchange manager not available, using legacy: {e}")
+            logger.warning(f"[Trade] ExchangeManager unavailable for {proposal.symbol}, using legacy Kraken path: {e}")
             return None
 
     def _record_to_portfolio(self, proposal: TradeProposal, exchange: str, fee_gbp: float = 0.0):
@@ -897,17 +902,6 @@ class TradingEngine:
         try:
             from ml.portfolio_tracker import get_portfolio_tracker
             tracker = get_portfolio_tracker()
-
-            # For buys: retrieve the Q-learning state that was computed at scan time.
-            # Stored in the holding so record_outcome() at close time has the correct
-            # buy-time state even after a process restart (bypasses the in-memory cache).
-            ql_state = ""
-            if proposal.side.lower() == "buy":
-                try:
-                    from ml.q_learning import get_q_learner
-                    ql_state = get_q_learner()._symbol_state_cache.get(proposal.symbol, "")
-                except Exception:
-                    pass
 
             tracker.record_trade(
                 symbol=proposal.symbol,
@@ -923,7 +917,6 @@ class TradingEngine:
                 fee_gbp=fee_gbp,
                 coin_name=proposal.coin_name or "",
                 trade_mode=getattr(proposal, "trade_mode", "accumulate"),
-                ql_state=ql_state,
             )
         except Exception as e:
             logger.error(f"Failed to record trade to portfolio: {e}")
@@ -1392,23 +1385,7 @@ def compute_allocation_pct(
         elif mcap >= 500_000_000:   # large/mid-cap: more liquid, allow larger position
             base_pct *= 1.15
 
-    # 3. Q-learning state performance scaling
-    # Only fires when the state has been visited enough times to be reliable
-    try:
-        from ml.q_learning import get_q_learner, discretise_state
-        ql = get_q_learner()
-        ql_state = discretise_state(coin_data)
-        total_visits = sum(ql.visit_counts[ql_state].values())
-        if total_visits >= ql.min_visits_to_act * 2:
-            q_buy = ql.q_table[ql_state]["buy"]
-            if q_buy > 0.15:
-                base_pct *= 1.2    # proven winning pattern — size up
-            elif q_buy < -0.15:
-                base_pct *= 0.75   # proven losing pattern — size down
-    except Exception:
-        pass
-
-    # 4. Portfolio concentration cap
+    # 3. Portfolio concentration cap
     # When we already have a meaningful holding, reduce the add-on size
     try:
         from ml.portfolio_tracker import get_portfolio_tracker

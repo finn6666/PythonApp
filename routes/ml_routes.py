@@ -1,5 +1,5 @@
 """
-ML pipeline, gem detection, agent analysis, and portfolio routes.
+Agent analysis, portfolio, and gem score routes.
 """
 
 import os
@@ -14,137 +14,6 @@ from extensions import limiter
 logger = logging.getLogger(__name__)
 
 ml_bp = Blueprint('ml', __name__)
-
-
-# ─── ML Status & Management ──────────────────────────────────
-
-@ml_bp.route('/api/ml/status')
-def get_ml_status():
-    try:
-        if not state.ML_AVAILABLE or state.ml_pipeline is None:
-            error_details = {
-                'error': 'ML components not available',
-                'ML_AVAILABLE': state.ML_AVAILABLE,
-                'ml_pipeline_exists': state.ml_pipeline is not None,
-                'suggestion': 'Click "Train ML Model" to initialize and train the model',
-            }
-            try:
-                import sklearn, pandas, numpy
-                error_details['dependencies_ok'] = True
-            except ImportError as ie:
-                error_details['dependencies_ok'] = False
-                error_details['missing_dependency'] = str(ie)
-            return jsonify({'ml_status': error_details, 'service_available': False})
-
-        status = state.ml_pipeline.get_status()
-        return jsonify({'ml_status': status, 'service_available': True})
-    except Exception as e:
-        logger.error(f"Error getting ML status: {e}")
-        return jsonify({'error': 'ML status unavailable', 'service_available': False}), 500
-
-
-@ml_bp.route('/api/ml/predict/<symbol>')
-def get_ml_prediction(symbol):
-    try:
-        if not state.ML_AVAILABLE or state.ml_pipeline is None or not state.ml_pipeline.model_loaded:
-            return jsonify({'error': 'ML model not available'}), 503
-        coin = next((c for c in state.analyzer.coins if c.symbol.upper() == symbol.upper()), None)
-        if not coin:
-            return jsonify({'error': f'Coin {symbol} not found in current data'}), 404
-        features = {
-            'price_change_1h': coin.price_change_24h or 0,
-            'price_change_24h': coin.price_change_24h or 0,
-            'volume_change_24h': 0, 'market_cap_change_24h': 0,
-            'rsi': 50, 'macd': 0,
-            'moving_avg_7d': coin.price or 0, 'moving_avg_30d': coin.price or 0,
-        }
-        result = state.ml_pipeline.predict_with_validation(features)
-        result['coin'] = {'symbol': coin.symbol, 'name': coin.name, 'current_price': coin.price, 'attractiveness_score': coin.attractiveness_score}
-        return jsonify(result)
-    except Exception as e:
-        logger.error(f"ML prediction error for {symbol}: {e}")
-        return jsonify({'error': 'Prediction failed'}), 500
-
-
-@ml_bp.route('/api/ml/train', methods=['POST'])
-@limiter.limit('2 per hour')
-@require_trading_auth
-def train_ml_model():
-    try:
-        logger.info("ML Training requested")
-        if not state.ML_AVAILABLE or state.ml_pipeline is None:
-            if not state.initialize_ml():
-                return jsonify({'success': False, 'error': 'ML components not available.'}), 503
-        if not os.path.exists('models'):
-            os.makedirs('models')
-        sample_path = 'models/sample_training_data.csv'
-        sample_df = state.ml_pipeline.create_sample_data(symbol="BTC", days=30)
-        sample_df.to_csv(sample_path, index=False)
-        training_result = state.ml_pipeline.train_model(sample_path)
-        state.ml_pipeline.export_model(os.path.join(project_root, 'models'))
-        return jsonify({'success': True, 'message': 'Model trained successfully!', 'training_result': training_result, 'status': state.ml_pipeline.get_status(), 'rows_trained': len(sample_df)})
-    except Exception as e:
-        logger.error(f"ML training failed: {e}", exc_info=True)
-        return jsonify({'success': False, 'error': 'Training failed'}), 500
-
-
-@ml_bp.route('/api/ml/initialize', methods=['POST'])
-@require_trading_auth
-def initialize_ml_endpoint():
-    success = state.initialize_ml()
-    return jsonify({'success': success, 'message': 'ML components initialized successfully' if success else 'Failed to initialize ML components', 'ml_available': state.ML_AVAILABLE})
-
-
-@ml_bp.route('/api/gemini/quota')
-@require_trading_auth
-@limiter.limit('5 per hour')
-def check_gemini_quota():
-    try:
-        api_key = os.getenv('GOOGLE_API_KEY')
-        if not api_key:
-            return jsonify({'error': 'GOOGLE_API_KEY not found'}), 500
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        try:
-            model = genai.GenerativeModel('gemini-3-flash-preview')
-            response = model.generate_content("Say 'OK'")
-            return jsonify({'status': 'SUCCESS', 'message': 'Gemini API is working!', 'test_response': response.text})
-        except Exception as e:
-            if '429' in str(e) or 'quota' in str(e).lower():
-                return jsonify({'status': 'QUOTA_ERROR', 'message': 'Still hitting quota limits'})
-            raise
-    except Exception as e:
-        logger.error(f"Gemini quota check failed: {e}")
-        return jsonify({'error': 'Failed to test Gemini API', 'message': 'Failed to test Gemini API'}), 500
-
-
-@ml_bp.route('/api/debug/ml')
-@require_trading_auth
-def debug_ml_system():
-    try:
-        models_dir = os.path.join(project_root, 'models')
-        return jsonify({
-            'ml_pipeline': {
-                'ML_AVAILABLE': state.ML_AVAILABLE,
-                'ml_pipeline_exists': state.ml_pipeline is not None,
-                'model_loaded': state.ml_pipeline.model_loaded if state.ml_pipeline else False,
-                'training_status': state.ml_pipeline.training_status if state.ml_pipeline else 'N/A',
-                'last_training_time': str(state.ml_pipeline.last_training_time) if state.ml_pipeline and state.ml_pipeline.last_training_time else None,
-            },
-            'model_files': {
-                'models_dir_exists': os.path.exists(models_dir),
-                'crypto_model_pkl': os.path.exists(os.path.join(models_dir, 'crypto_model.pkl')),
-                'scaler_pkl': os.path.exists(os.path.join(models_dir, 'scaler.pkl')),
-            },
-            'analyzer': {
-                'total_coins': len(state.analyzer.coins),
-                'coins_with_price': len([c for c in state.analyzer.coins if c.price and c.price > 0]),
-            },
-        })
-    except Exception as e:
-        logger.error(f"Debug ML error: {e}")
-        return jsonify({'error': 'Debug info unavailable'}), 500
-
 
 
 # ─── Agent Analysis ───────────────────────────────────────────────
@@ -299,7 +168,6 @@ def gem_accuracy_report():
 # ─── Heatmap Data ─────────────────────────────────────────────
 
 @ml_bp.route('/api/heatmap-data')
-@require_trading_auth
 def heatmap_data():
     """Return top coins with gem scores for the dashboard heatmap.
     Sorted by attractiveness_score descending; max 60 coins.

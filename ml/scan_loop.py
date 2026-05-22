@@ -98,6 +98,7 @@ class ScanLoop:
             "scan_id": scan_id,
             "triggered_by": triggered_by,
             "started_at": scan_start.isoformat(),
+            "regime": self._get_market_regime(),
             "coins_refreshed": 0,
             "coins_tradeable": 0,
             "coins_analysed": 0,
@@ -135,9 +136,24 @@ class ScanLoop:
             candidates = self._select_candidates(tradeable_coins)
 
             # ── Step 4: Quick screen (Tier 1 — 1 Gemini call each) ──
-            logger.info(f"[Scan {scan_id}] Step 4: Quick-screening {len(candidates)} candidates...")
-            screened_candidates = self._quick_screen_candidates(candidates, scan_id)
-            scan_result["coins_quick_screened"] = len(candidates)
+            # Skip entirely when the trading budget is already exhausted — no
+            # point spending ~25 Gemini calls per hour on coins we cannot buy.
+            try:
+                from ml.trading_engine import get_trading_engine as _get_eng
+                _buy_budget_ok = not _get_eng().is_budget_exhausted()
+            except Exception:
+                _buy_budget_ok = True
+
+            if not _buy_budget_ok:
+                logger.info(
+                    f"[Scan {scan_id}] Trading budget exhausted — "
+                    "skipping quick screen and full analysis"
+                )
+                screened_candidates = []
+            else:
+                logger.info(f"[Scan {scan_id}] Step 4: Quick-screening {len(candidates)} candidates...")
+                screened_candidates = self._quick_screen_candidates(candidates, scan_id)
+            scan_result["coins_quick_screened"] = len(candidates) if _buy_budget_ok else 0
             scan_result["coins_passed_screen"] = len(screened_candidates)
             scan_result["coins_analysed"] = len(screened_candidates)
             logger.info(
@@ -310,15 +326,28 @@ class ScanLoop:
     # ─── Pipeline Steps ───────────────────────────────────────
 
     def _refresh_data(self) -> bool:
-        """Step 1: Refresh coin data from CoinMarketCap."""
+        """Step 1: Refresh coin data from configured source (exchanges or CoinGecko)."""
         try:
-            from src.core.live_data_fetcher import fetch_and_update_data
             import services.app_state as state
 
-            live_data = fetch_and_update_data()
+            data_source = os.getenv("SCAN_DATA_SOURCE", "exchanges").lower()
+
+            if data_source == "exchanges":
+                from src.core.live_data_fetcher import fetch_from_exchanges_data
+                max_coins = int(os.getenv("SCAN_EXCHANGE_MAX_COINS", "300"))
+                live_data = fetch_from_exchanges_data(max_coins=max_coins)
+                if not live_data:
+                    # Fall back to CoinGecko if exchange fetch fails
+                    logger.warning("Exchange data fetch failed — falling back to CoinGecko")
+                    from src.core.live_data_fetcher import fetch_and_update_data
+                    live_data = fetch_and_update_data()
+            else:
+                from src.core.live_data_fetcher import fetch_and_update_data
+                live_data = fetch_and_update_data()
+
             if live_data:
                 # Also fetch any pipeline-tracked symbols
-                if state.SYMBOLS_AVAILABLE and state.data_pipeline:
+                if getattr(state, 'data_pipeline', None):
                     current_symbols = [c.symbol for c in state.analyzer.coins]
                     for symbol in state.data_pipeline.supported_symbols:
                         if symbol not in current_symbols:
@@ -327,7 +356,7 @@ class ScanLoop:
                             except Exception:
                                 pass
                 state.analyzer.load_data()
-                logger.info(f"Data refreshed — {len(state.analyzer.coins)} coins loaded")
+                logger.info(f"Data refreshed ({data_source}) — {len(state.analyzer.coins)} coins loaded")
                 return True
             return False
         except Exception as e:
@@ -429,6 +458,20 @@ class ScanLoop:
                 )
                 candidates.extend(fallback[:filled])
 
+        # Pre-filter coins with no market data at all (zero market cap AND zero
+        # volume) — these are dead/errored projects that quick-screen always rejects.
+        # Filtering here avoids wasting a Gemini call on an obvious no.
+        before = len(candidates)
+        candidates = [
+            c for c in candidates
+            if c.get("market_cap", 0) > 0 or c.get("volume_24h", 0) > 0
+        ]
+        if len(candidates) < before:
+            logger.info(
+                f"[Scan] Pre-filtered {before - len(candidates)} coins with "
+                "zero market cap and volume"
+            )
+
         # Cap to max
         return candidates[: self.max_coins_per_scan]
 
@@ -489,6 +532,11 @@ class ScanLoop:
                 confidence = result.get("confidence", 0)
                 one_liner = result.get("one_liner", "")
 
+                # 4s between calls keeps burst rate ~11 RPM, under the 15 RPM free-tier limit.
+                # On a rate-limit, wait 65s to land retries in a fresh RPM window (window = 60s).
+                _rate_limited = not did_pass and ("rate limit" in one_liner.lower() or "rate limited" in one_liner.lower() or "no response" in one_liner.lower())
+                time.sleep(65 if _rate_limited else 4)
+
                 if did_pass and confidence >= effective_threshold:
                     logger.info(
                         f"[Scan {scan_id}] {symbol}: PASS ({confidence}%) — {one_liner}"
@@ -509,9 +557,13 @@ class ScanLoop:
                     })
 
             except Exception as e:
-                # On failure, pass through to avoid missing opportunities
-                logger.warning(f"[Scan {scan_id}] Quick screen error for {symbol}: {e} — passing")
-                passed.append(coin)
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    logger.warning(f"[Scan {scan_id}] Quick screen rate limit for {symbol} — skipping")
+                else:
+                    # Non-rate-limit error: pass through to avoid missing opportunities
+                    logger.warning(f"[Scan {scan_id}] Quick screen error for {symbol}: {e} — passing")
+                    passed.append(coin)
 
         return passed
 
@@ -541,6 +593,25 @@ class ScanLoop:
                             "proposed": False,
                             "reason": f"Recent analysis ({age_hours:.1f}h ago) found no trade — reusing result",
                         }
+                    else:
+                        # Previous result was BUY — don't re-buy if coin already held.
+                        # The scan runs hourly; without this guard a high-scoring coin
+                        # gets re-bought every cycle, stacking positions in the same coin.
+                        try:
+                            from ml.portfolio_tracker import get_portfolio_tracker
+                            _holding = get_portfolio_tracker().holdings.get(symbol.upper(), {})
+                            if _holding.get("quantity", 0) > 0:
+                                logger.info(
+                                    f"[Scan] {symbol}: cached BUY ({age_hours:.1f}h old), "
+                                    f"coin already held — skipping re-buy"
+                                )
+                                return {
+                                    "outcome": "skipped",
+                                    "proposed": False,
+                                    "reason": f"Already held; recent BUY analysis ({age_hours:.1f}h ago) — no re-buy",
+                                }
+                        except Exception:
+                            pass
 
         # Check trading budget before spending API credits
         if engine.is_budget_exhausted():
@@ -643,81 +714,6 @@ class ScanLoop:
                     allocation_pct = min(80, conf - 10)
                     trade_reasoning = analysis.get("analysis", "Gem detector recommended trade")[:500]
 
-            # ── Option B: 5-agent deep validator (high-conviction second opinion) ──
-            # When the debate returns high conviction, run the legacy 5-agent chain
-            # as an independent cross-check before committing real money.
-            # Only adds cost on the ~1-2 coins per scan most likely to trade.
-            validator_enabled = os.getenv("DEBATE_VALIDATOR_ENABLED", "true").lower() in ("1", "true", "yes")
-            validator_threshold = int(os.getenv("DEBATE_VALIDATOR_THRESHOLD", "75"))
-            if validator_enabled and should_trade and conviction >= validator_threshold:
-                try:
-                    from ml.agents.official.orchestrator import analyze_crypto
-                    from services.gemini_budget import get_gemini_budget, BudgetExceededError
-                    get_gemini_budget().check_and_record("validator")
-                    logger.info(
-                        f"[Scan] {symbol}: conviction={conviction}% >= {validator_threshold}% — "
-                        f"running 5-agent validator as second opinion"
-                    )
-                    validator_analysis = state.run_async(
-                        analyze_crypto(symbol, coin_data, session_id=f"validator_{symbol}")
-                    )
-                    if validator_analysis and validator_analysis.get("success"):
-                        v_decision = validator_analysis.get("trade_decision", {})
-                        v_conviction = int(v_decision.get("trade_conviction", 0) or 0)
-                        v_should_trade = v_decision.get("should_trade", False)
-                        logger.info(
-                            f"[Scan] {symbol}: validator conviction={v_conviction}%, "
-                            f"should_trade={v_should_trade}"
-                        )
-                        if v_should_trade and v_conviction >= 45:
-                            # Both agree — take the max conviction (validator validates the buy)
-                            conviction = max(conviction, v_conviction)
-                            trade_reasoning = (
-                                f"Debate: {trade_reasoning[:200]} | "
-                                f"Validator: {v_decision.get('trade_reasoning', '')[:200]}"
-                            )
-                            logger.info(f"[Scan] {symbol}: validator CONFIRMED — conviction={conviction}%")
-                        else:
-                            # Validator disagrees — use the average, making it harder to clear threshold
-                            old_conviction = conviction
-                            conviction = (conviction + v_conviction) // 2
-                            logger.warning(
-                                f"[Scan] {symbol}: validator DISAGREED (v_conviction={v_conviction}%) — "
-                                f"conviction downgraded {old_conviction} -> {conviction}"
-                            )
-                except BudgetExceededError as _be:
-                    logger.warning(f"[Scan] {symbol}: Gemini budget exceeded — skipping validator: {_be}")
-                except Exception as e:
-                    logger.warning(f"[Scan] {symbol}: 5-agent validator failed (continuing with debate result): {e}")
-
-            # ── Q-learning adjustment ──
-            # Let the RL agent nudge conviction based on past outcomes
-            # for this coin's state pattern (gem tier, vol, weekly change, mcap)
-            try:
-                from ml.q_learning import get_q_learner
-                ql = get_q_learner()
-                ql_adjust = ql.confidence_adjustment(coin_data)
-                if ql_adjust != 0:
-                    original_conviction = conviction
-                    conviction = max(0, min(100, conviction + ql_adjust))
-                    logger.info(
-                        f"[QL] {symbol}: conviction {original_conviction} → "
-                        f"{conviction} (adjustment {ql_adjust:+d})"
-                    )
-
-                # Also check if Q-learning outright recommends skipping
-                should_ql_skip, skip_reason = ql.should_skip(coin_data)
-                if should_ql_skip and conviction < 80:
-                    # High-conviction agent calls can override Q-learning skip
-                    logger.info(f"[QL] {symbol}: {skip_reason}")
-                    return {
-                        "outcome": "skipped",
-                        "proposed": False,
-                        "reason": skip_reason,
-                    }
-            except Exception as e:
-                logger.debug(f"Q-learning adjustment skipped: {e}")
-
             # Adjust conviction threshold by market regime
             regime = self._get_market_regime()
             regime_thresholds = {"bull": 40, "neutral": 45, "bear": 60}
@@ -800,6 +796,7 @@ class ScanLoop:
                     coin_name=coin_data.get("name", ""),
                     trade_mode=trade_mode,
                     debate_data=debate_data,
+                    skip_cooldown=True,  # max_proposals cap already limits scan buys; cooldown only guards same-coin rapid re-buys
                 )
 
                 outcome = "executed" if result.get("auto_approved") else "proposed"
@@ -836,6 +833,10 @@ class ScanLoop:
         Classify current market regime from BTC 7-day performance.
         Returns 'bull', 'bear', or 'neutral'.
         Used to dynamically adjust the conviction threshold per scan.
+
+        Primary source: state.analyzer.coins (populated at startup/refresh).
+        Fallback: CoinGecko /coins/markets for bitcoin, cached to disk for 6h
+        so we don't burn rate-limit quota on every scan.
         """
         try:
             import services.app_state as state
@@ -850,6 +851,68 @@ class ScanLoop:
                         return "neutral"
         except Exception:
             pass
+
+        # Fallback: read BTC 7d change from a CoinGecko cache file (6h TTL)
+        return self._btc_regime_from_cache()
+
+    def _btc_regime_from_cache(self) -> str:
+        """Fetch BTC 7d % change from cache or CoinGecko, classify regime."""
+        cache_file = Path("data/btc_regime_cache.json")
+        cache_ttl_secs = 6 * 3600
+
+        # Try reading fresh cache
+        try:
+            if cache_file.exists():
+                with open(cache_file) as f:
+                    cached = json.load(f)
+                age = (datetime.utcnow() - datetime.fromisoformat(cached["fetched_at"])).total_seconds()
+                if age < cache_ttl_secs:
+                    pct = float(cached.get("price_change_7d") or 0)
+                    if pct > 10:
+                        return "bull"
+                    if pct < -10:
+                        return "bear"
+                    return "neutral"
+        except Exception:
+            pass
+
+        # Cache is stale or missing — fetch from CoinGecko
+        try:
+            import requests as _req
+            coingecko_key = os.getenv("COINGECKO_API_KEY", "")
+            headers = {"x-cg-demo-api-key": coingecko_key} if coingecko_key else {}
+            resp = _req.get(
+                "https://api.coingecko.com/api/v3/coins/markets",
+                params={
+                    "vs_currency": "gbp",
+                    "ids": "bitcoin",
+                    "price_change_percentage": "7d",
+                },
+                headers=headers,
+                timeout=8,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data:
+                pct = float(data[0].get("price_change_percentage_7d_in_currency") or 0)
+                try:
+                    cache_file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(cache_file, "w") as f:
+                        json.dump({
+                            "price_change_7d": round(pct, 2),
+                            "fetched_at": datetime.utcnow().isoformat(),
+                        }, f)
+                except Exception:
+                    pass
+                logger.info(f"[Regime] BTC 7d change: {pct:+.1f}% — {'bull' if pct > 10 else 'bear' if pct < -10 else 'neutral'}")
+                if pct > 10:
+                    return "bull"
+                if pct < -10:
+                    return "bear"
+                return "neutral"
+        except Exception as e:
+            logger.debug(f"[Regime] BTC CoinGecko fetch failed: {e}")
+
         return "neutral"
 
     # ─── Audit Trail ──────────────────────────────────────────
@@ -934,24 +997,31 @@ class ScanLoop:
 
     def _scheduler_loop(self):
         """Background loop that triggers scans at the configured interval."""
-        import schedule
+        import time as _time
 
         if self.scan_interval_hours > 0:
-            # Interval mode: scan every N hours
-            interval_min = int(self.scan_interval_hours * 60)
-            schedule.every(interval_min).minutes.do(
-                lambda: self.run_scan(triggered_by="scheduled")
-            )
-            logger.info(f"Scan scheduled every {self.scan_interval_hours}h ({interval_min} min)")
+            interval_sec = int(self.scan_interval_hours * 3600)
+            logger.info(f"Scan scheduled every {self.scan_interval_hours}h ({interval_sec}s)")
+            next_run = _time.monotonic() + interval_sec
         else:
-            # Legacy mode: once daily at a fixed time
-            schedule.every().day.at(self.scan_time).do(
-                lambda: self.run_scan(triggered_by="scheduled")
-            )
+            # Legacy mode: once daily at a fixed time — convert to interval from now
+            from datetime import datetime as _dt
+            target_h, target_m = (int(p) for p in self.scan_time.split(":"))
+            now = _dt.utcnow()
+            target = now.replace(hour=target_h, minute=target_m, second=0, microsecond=0)
+            if target <= now:
+                target = target.replace(day=target.day + 1)
+            interval_sec = int((target - now).total_seconds())
             logger.info(f"Scan scheduled daily at {self.scan_time}")
+            next_run = _time.monotonic() + interval_sec
 
         while not self._stop_event.is_set():
-            schedule.run_pending()
+            if _time.monotonic() >= next_run:
+                self.run_scan(triggered_by="scheduled")
+                if self.scan_interval_hours > 0:
+                    next_run = _time.monotonic() + interval_sec
+                else:
+                    next_run = _time.monotonic() + 86400
             self._stop_event.wait(30)  # Check every 30 seconds
 
     # ─── Status ───────────────────────────────────────────────

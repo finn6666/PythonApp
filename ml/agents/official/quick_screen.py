@@ -6,6 +6,7 @@ Saves ~80% of API calls by filtering out obvious skips early.
 
 import os
 import logging
+import uuid
 from typing import Dict, Any
 from google.adk import Agent, Runner
 from google.adk.sessions import InMemorySessionService
@@ -13,8 +14,6 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
-
-_session_service = InMemorySessionService()
 
 # Use a lighter/cheaper model for quick screen — it's a binary triage filter,
 # not a deep analysis. Override via QUICK_SCREEN_MODEL env var if needed.
@@ -72,13 +71,6 @@ async def quick_screen_coin(
     Returns:
         {"pass": bool, "confidence": int, "one_liner": str}
     """
-    runner = Runner(
-        app_name="quick_screen_app",
-        agent=quick_screen_agent,
-        session_service=_session_service,
-        auto_create_session=True,
-    )
-
     # Build a compact data line
     parts = [
         f"{coin_data.get('name', symbol)} ({symbol})",
@@ -106,15 +98,70 @@ Return JSON: {{"action": "PASS"|"SKIP", "confidence": 0-100, "play_type": "accum
         )
 
         result_text = ""
-        for event in runner.run(
-            user_id="screener",
-            session_id=f"screen_{symbol}",
-            new_message=message,
-        ):
-            if hasattr(event, "content") and event.content and event.content.parts:
-                for part in event.content.parts:
-                    if hasattr(part, "text") and part.text:
-                        result_text += part.text
+        # Start backoff above the RPM window so the first retry clears it.
+        # Gemini's RPM window is 60s; beginning at 65s ensures retries land
+        # in a fresh window rather than compounding within the same minute.
+        _delay = 65.0
+        import asyncio as _asyncio
+        from services.gemini_budget import get_gemini_ratelimiter
+
+        for _attempt in range(1, 4):
+            # Acquire a rate-limiter slot before EVERY attempt (including retries)
+            # so that retries are counted against the RPM budget the same as
+            # first attempts. Previously a single acquire() covered all 3 retries,
+            # allowing up to 36 actual API calls per minute against a 12 RPM cap.
+            get_gemini_ratelimiter().acquire()
+            # Use a unique session ID per attempt so no conversation history
+            # accumulates across calls. Reusing session_id=f"screen_{symbol}"
+            # caused ADK to append every screen to the same session, ballooning
+            # the token count for coins screened repeatedly (T, TIA, etc.) and
+            # silently triggering TPM limits returned as empty responses.
+            _session_id = f"screen_{symbol}_{uuid.uuid4().hex[:8]}"
+            _session_service = InMemorySessionService()
+            try:
+                runner = Runner(
+                    app_name="quick_screen_app",
+                    agent=quick_screen_agent,
+                    session_service=_session_service,
+                    auto_create_session=True,
+                )
+                for event in runner.run(
+                    user_id="screener",
+                    session_id=_session_id,
+                    new_message=message,
+                ):
+                    if hasattr(event, "content") and event.content and event.content.parts:
+                        for part in event.content.parts:
+                            if hasattr(part, "text") and part.text:
+                                result_text += part.text
+                # ADK can silently swallow a 429 and return empty content — detect that here
+                if not result_text.strip() and _attempt < 3:
+                    logger.warning(
+                        f"Quick screen empty response for {symbol} (attempt {_attempt}/3) "
+                        f"— possible silent rate limit, waiting {_delay:.0f}s"
+                    )
+                    await _asyncio.sleep(_delay)
+                    _delay = min(_delay * 2, 120.0)
+                    result_text = ""
+                    continue
+                break  # success — exit retry loop
+            except Exception as _e:
+                _err = str(_e)
+                if ("429" in _err or "RESOURCE_EXHAUSTED" in _err) and _attempt < 3:
+                    logger.warning(
+                        f"Quick screen rate limit for {symbol} (attempt {_attempt}/3) "
+                        f"— retrying in {_delay:.0f}s"
+                    )
+                    await _asyncio.sleep(_delay)
+                    _delay = min(_delay * 2, 120.0)
+                    result_text = ""
+                    continue
+                raise
+
+        # If result_text is still empty after all attempts, skip to avoid wasting full analysis
+        if not result_text.strip():
+            logger.warning(f"Quick screen for {symbol}: no response after retries — skipping to protect budget")
+            return {"pass": False, "confidence": 0, "one_liner": "No response from screen — rate limited", "play_type": "accumulate"}
 
         # Parse JSON from response.
         # Handle markdown code fences (```json ... ```) and nested objects.
@@ -155,6 +202,10 @@ Return JSON: {{"action": "PASS"|"SKIP", "confidence": 0-100, "play_type": "accum
         return {"pass": True, "confidence": 100, "one_liner": "Could not parse screen result — passing to be safe", "play_type": "accumulate"}
 
     except Exception as e:
+        err_str = str(e)
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+            logger.warning(f"Quick screen rate limit for {symbol} after retries — skipping to protect budget")
+            return {"pass": False, "confidence": 0, "one_liner": f"Rate limit: {e}", "play_type": "accumulate"}
         logger.warning(f"Quick screen failed for {symbol}: {e}")
-        # On error, pass through to avoid missing opportunities
+        # On non-rate-limit errors, pass through to avoid missing opportunities
         return {"pass": True, "confidence": 100, "one_liner": f"Screen error: {e}", "play_type": "accumulate"}

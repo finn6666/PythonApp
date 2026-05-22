@@ -162,20 +162,45 @@ class MarketMonitor:
 
             from ml.exchange_manager import get_exchange_manager
             mgr = get_exchange_manager()
-            prices = mgr.get_live_prices_gbp(held)
+            results = mgr.get_live_prices_with_changes_gbp(held)
 
             now = datetime.utcnow().isoformat()
-            for sym, price in prices.items():
-                self._portfolio_prices[sym] = {"price_gbp": price, "updated_at": now}
+            for sym, data in results.items():
+                self._portfolio_prices[sym] = {
+                    "price_gbp": data["price"],
+                    "change_24h": data.get("change_24h"),
+                    "updated_at": now,
+                }
 
             self._last_portfolio_refresh = datetime.utcnow()
-            logger.debug(f"[Monitor] Portfolio prices refreshed: {len(prices)}/{len(held)} coins")
+            logger.debug(f"[Monitor] Portfolio prices refreshed: {len(results)}/{len(held)} coins")
         except Exception as e:
             logger.warning(f"[Monitor] Portfolio price refresh error: {e}")
 
     def get_portfolio_prices(self) -> Dict[str, float]:
         """Return cached portfolio prices as {symbol: price_gbp}."""
         return {sym: data["price_gbp"] for sym, data in self._portfolio_prices.items()}
+
+    def get_portfolio_price_changes(self) -> Dict[str, float]:
+        """Return cached 24h price change percentages as {symbol: change_pct}.
+        Only includes symbols where the exchange ticker provided a percentage.
+        """
+        return {
+            sym: data["change_24h"]
+            for sym, data in self._portfolio_prices.items()
+            if data.get("change_24h") is not None
+        }
+
+    @property
+    def portfolio_cache_is_cold(self) -> bool:
+        """True if the portfolio price cache has never been populated (e.g. fresh restart)."""
+        return self._last_portfolio_refresh == datetime.min
+
+    def trigger_portfolio_refresh_async(self) -> None:
+        """Kick off a background portfolio price refresh without blocking the caller."""
+        import threading
+        t = threading.Thread(target=self._refresh_portfolio_prices, daemon=True, name="portfolio-refresh")
+        t.start()
 
     def _run_price_check(self):
         """Check held positions against exit thresholds using cached prices."""
@@ -332,9 +357,6 @@ class MarketMonitor:
                 for a in alerts:
                     self._log_alert("momentum", a)
 
-                # Email digest if significant alerts exist
-                self._send_alert_digest(alerts)
-
             self._stats["momentum_checks"] += 1
             self._stats["last_momentum_check"] = datetime.utcnow().isoformat()
 
@@ -418,10 +440,14 @@ class MarketMonitor:
                 })
 
                 # ── Opportunistic buy: feed high-scoring coins to trading pipeline ──
+                # Limit to the single best gem per cycle to protect Gemini RPM quota.
+                # The 6h per-coin cooldown in _trigger_buy_analysis prevents re-triggering;
+                # the daily cap (auto_buy_max_per_day) is enforced inside _trigger_buy_analysis.
                 if self.auto_buy_enabled:
-                    for gem in new_gems:
+                    for gem in new_gems:  # already sorted by gem_score desc
                         if gem["gem_score"] >= self.auto_buy_min_gem:
                             self._trigger_buy_analysis(gem, trigger="quick_scan_gem")
+                            break  # one debate per quick-scan cycle — next gem picks up next cycle
 
             self._stats["quick_scans"] += 1
             self._stats["last_quick_scan"] = datetime.utcnow().isoformat()
@@ -453,26 +479,31 @@ class MarketMonitor:
                 logger.debug(f"[Monitor] {symbol} analysed recently, skipping (cooldown)")
                 return
 
-            # Respect the scan loop's analysis cache — if it contains a recent SKIP for
-            # this coin, don't burn an API call re-analysing it. This also survives
-            # restarts (in-memory cooldowns are lost on restart; the cache is persistent).
+            # Respect the scan loop's analysis cache — skip re-analysis if a recent
+            # result exists (SKIP or BUY). This survives restarts because the cache is
+            # persistent on disk; in-memory cooldowns are lost on restart and would
+            # otherwise re-trigger the same coin immediately after a service restart.
+            # Use the monitor's own buy_analysis_cooldown_min (default 6h) as the
+            # window, NOT scan_loop's analysis_reuse_hours (default 5h) — the monitor
+            # cooldown is the authoritative guard for how often a coin can be re-analysed
+            # by the monitor, so the cache check must use the same window to be effective.
             try:
                 import time
                 import services.app_state as _state
-                from ml.scan_loop import get_scan_loop
-                _reuse_hours = get_scan_loop().analysis_reuse_hours
+                _reuse_hours = self.buy_analysis_cooldown_min / 60.0
                 if _reuse_hours > 0:
                     _cached = _state.get_cached_analysis(symbol)
                     if _cached:
                         _age_hours = (time.time() - _cached.get("_cached_at", 0)) / 3600
                         if _age_hours <= _reuse_hours:
-                            _decision = _cached.get("analysis", {}).get("trade_decision", {})
-                            if not _decision.get("should_trade", False):
-                                logger.debug(
-                                    f"[Monitor] {symbol}: cached SKIP ({_age_hours:.1f}h old) "
-                                    f"— skipping monitor trigger"
-                                )
-                                return
+                            # Skip regardless of should_trade: a recent positive result
+                            # already produced a proposal/trade; re-running it on restart
+                            # burns quota and can create duplicate proposals.
+                            logger.debug(
+                                f"[Monitor] {symbol}: cached result ({_age_hours:.1f}h old) "
+                                f"— skipping monitor trigger (cooldown survives restart)"
+                            )
+                            return
             except Exception:
                 pass
 

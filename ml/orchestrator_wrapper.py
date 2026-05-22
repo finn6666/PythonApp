@@ -16,10 +16,10 @@ def _get_analyze_crypto():
     global _analyze_crypto_fn
     if _analyze_crypto_fn is None:
         try:
-            from ml.agents.official import analyze_crypto
-            _analyze_crypto_fn = analyze_crypto
+            from ml.agents.official.debate_orchestrator import analyze_crypto_debate
+            _analyze_crypto_fn = analyze_crypto_debate
         except Exception as e:
-            logger.warning(f"OrchestratorWrapper: could not import analyze_crypto — {e}")
+            logger.warning(f"OrchestratorWrapper: could not import analyze_crypto_debate — {e}")
             _analyze_crypto_fn = None
     return _analyze_crypto_fn
 
@@ -42,7 +42,6 @@ class OrchestratorWrapper:
                 symbol=symbol,
                 coin_data=coin_data,
                 session_id=f"portfolio_{symbol}",
-                use_memory=False,
             )
         except Exception as e:
             return {'error': str(e)}

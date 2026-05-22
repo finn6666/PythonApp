@@ -17,15 +17,18 @@ logger = logging.getLogger(__name__)
 
 
 def retry(max_attempts: int = 3, base_delay: float = 1.0, backoff: float = 2.0,
-          exceptions: tuple = (Exception,)):
+          exceptions: tuple = (Exception,), warn_on_retry: bool = True):
     """
     Retry decorator with exponential backoff.
 
     Args:
-        max_attempts: Maximum number of attempts (including the first).
-        base_delay:   Initial delay in seconds between retries.
-        backoff:      Multiplier applied to delay after each failure.
-        exceptions:   Tuple of exception types that trigger a retry.
+        max_attempts:   Maximum number of attempts (including the first).
+        base_delay:     Initial delay in seconds between retries.
+        backoff:        Multiplier applied to delay after each failure.
+        exceptions:     Tuple of exception types that trigger a retry.
+        warn_on_retry:  If True (default), log intermediate failures at WARNING.
+                        Set False to use DEBUG — useful for self-healing transient
+                        errors (e.g. stale connections) that always succeed on retry.
     """
     def decorator(func):
         @functools.wraps(func)
@@ -42,7 +45,8 @@ def retry(max_attempts: int = 3, base_delay: float = 1.0, backoff: float = 2.0,
                             f"{func.__name__} failed after {max_attempts} attempts: {e}"
                         )
                         raise
-                    logger.warning(
+                    log_fn = logger.warning if warn_on_retry else logger.debug
+                    log_fn(
                         f"{func.__name__} attempt {attempt}/{max_attempts} failed: {e}  "
                         f"— retrying in {delay:.1f}s"
                     )

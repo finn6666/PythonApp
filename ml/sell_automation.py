@@ -18,7 +18,7 @@ import asyncio
 import json
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
@@ -88,8 +88,11 @@ class SellAutomation:
         self._tightened_trailing: Dict[str, float] = {}
         # Symbols too small to sell — logged once then silently skipped
         self._unsellable_dust: set = set()
+        # Throttle bad-price-feed sanity warnings to once per hour per symbol
+        self._last_sanity_warn: Dict[str, str] = {}
 
         self._load_state()
+        self._preload_unsellable_dust()
 
         logger.info(
             f"Sell automation: pump_capture={self.pump_capture_pct}%({self.pump_capture_fraction*100:.0f}%), "
@@ -219,20 +222,6 @@ class SellAutomation:
                     if stagnation["type"] not in pending_for_sym:
                         trigger = stagnation
 
-            # ── Q-learning: checkpoint unrealised P&L for open positions ──
-            if not trigger:
-                try:
-                    from ml.q_learning import get_q_learner
-                    ql = get_q_learner()
-                    ql.record_unrealised_checkpoint(
-                        symbol=symbol,
-                        coin_data=holding,
-                        pnl_pct=pnl_pct,
-                        hold_hours=hold_hours,
-                    )
-                except Exception:
-                    pass
-
             if trigger:
                 sell_fraction = trigger.get("sell_fraction", 1.0)
                 amount_gbp = current_price * quantity * sell_fraction
@@ -274,22 +263,6 @@ class SellAutomation:
                     pass
 
             if trigger:
-
-                # ── Q-learning: record closed position outcome (full exits only) ──
-                if sell_fraction >= 1.0:
-                    try:
-                        from ml.q_learning import get_q_learner
-                        ql = get_q_learner()
-                        ql.record_outcome(
-                            symbol=symbol,
-                            coin_data=holding,
-                            action="buy",
-                            pnl_pct=pnl_pct,
-                            hold_hours=hold_hours,
-                            exit_trigger=trigger["type"],
-                        )
-                    except Exception as e:
-                        logger.debug(f"Q-learning outcome recording failed: {e}")
 
                 result = engine.propose_and_auto_execute(
                     symbol=symbol,
@@ -342,24 +315,39 @@ class SellAutomation:
                         f"(PnL: {pnl_pct:.1f}%, {amount_gbp:.4f})"
                     )
                 else:
+                    err = result.get('error', 'unknown error')
                     logger.warning(
-                        f"SELL{partial_label} FAILED: {symbol} -- {trigger['type']} "
-                        f"({result.get('error', 'unknown error')})"
+                        f"SELL{partial_label} FAILED: {symbol} -- {trigger['type']} ({err})"
                     )
+                    # If exchange rejected because the position value is below their
+                    # minimum order size, mark as unsellable dust so subsequent cycles
+                    # don't keep retrying futile sells.
+                    if "minimum" in err.lower() or "400100" in err:
+                        if symbol not in self._unsellable_dust:
+                            logger.warning(
+                                f"{symbol}: marking as unsellable dust — "
+                                f"position below exchange minimum order size"
+                            )
+                            self._unsellable_dust.add(symbol)
+                            self._save_state()
 
         # Log when new dust positions are discovered, and write them off in portfolio
         if len(self._unsellable_dust) > prev_dust_count:
-            logger.info(
-                f"Sell automation: {len(self._unsellable_dust)} positions below exchange "
-                f"minimum (unsellable): {', '.join(sorted(self._unsellable_dust))}"
+            new_dust = sorted(self._unsellable_dust)
+            logger.warning(
+                f"Sell automation: {len(new_dust)} positions below exchange "
+                f"minimum (unsellable): {', '.join(new_dust)}"
             )
             try:
                 from ml.portfolio_tracker import get_portfolio_tracker
-                cleaned = get_portfolio_tracker().cleanup_dust(min_value_gbp=0.50)
+                dust_min = float(os.getenv("SELL_DUST_MIN_GBP", "0.50"))
+                cleaned = get_portfolio_tracker().cleanup_dust(min_value_gbp=dust_min)
                 if cleaned:
                     logger.info(f"Portfolio dust cleanup: wrote off {', '.join(cleaned)}")
             except Exception as e:
                 logger.debug(f"Portfolio dust cleanup failed: {e}")
+            # Persist so restarts don't re-fire the warning for known dust
+            self._save_state()
 
         # Optionally re-analyse with agents — exclude unsellable dust
         if (self.enable_agent_recheck or force_agent_recheck) and holdings:
@@ -396,6 +384,27 @@ class SellAutomation:
 
         within_hold_period = hold_hours < effective_min_hold
         tiers_taken = self._tiers_taken.get(symbol, set())
+
+        # Sanity check: if PnL exceeds 1,000,000% (10,000x) the price feed is
+        # almost certainly bad (wrong token, stale data, or unit mismatch).
+        # Skip all sell triggers to avoid proposing a £multi-million trade on
+        # garbage data. Stop-loss is exempt — a -50% loss is always plausible.
+        PRICE_FEED_SANITY_PCT = float(os.getenv("SELL_PRICE_FEED_SANITY_PCT", "1000000.0"))
+        if pnl_pct > PRICE_FEED_SANITY_PCT:
+            now_str = datetime.now(timezone.utc).isoformat()
+            last_warn = self._last_sanity_warn.get(symbol)
+            warn_age_h = (
+                (datetime.now(timezone.utc) - datetime.fromisoformat(last_warn)).total_seconds() / 3600
+                if last_warn else 999
+            )
+            if warn_age_h >= 1.0:
+                logger.warning(
+                    f"{symbol}: skipping sell triggers — PnL {pnl_pct:.0f}% exceeds "
+                    f"sanity limit {PRICE_FEED_SANITY_PCT:.0f}% — likely bad price feed "
+                    f"(entry £{entry_price:.8f} → current £{current_price:.8f})"
+                )
+                self._last_sanity_warn[symbol] = now_str
+            return None
 
         # 1. Stop-loss — always fires regardless of hold period (capital protection)
         if pnl_pct <= self.stop_loss_pct:
@@ -575,7 +584,7 @@ class SellAutomation:
         """
         from ml.exchange_manager import get_exchange_manager
         from ml.trading_engine import get_trading_engine
-        from ml.agents.official.orchestrator import analyze_crypto
+        from ml.agents.official.debate_orchestrator import analyze_crypto_debate
         from services.gemini_budget import get_gemini_budget, BudgetExceededError
 
         proposals = []
@@ -605,6 +614,7 @@ class SellAutomation:
                         f"({pnl_for_sym:.1f}%)"
                     )
                     self._last_drawdown_recheck[symbol] = now.isoformat()
+                    self._save_state()  # persist immediately so a restart mid-debate doesn't re-trigger
 
             try:
                 # Pre-check: skip positions too small to sell before spending API budget.
@@ -627,8 +637,8 @@ class SellAutomation:
 
                 async def _run_recheck():
                     return await asyncio.wait_for(
-                        analyze_crypto(symbol, coin_data=holding),
-                        timeout=60.0,
+                        analyze_crypto_debate(symbol, coin_data=holding),
+                        timeout=120.0,
                     )
 
                 try:
@@ -673,28 +683,6 @@ class SellAutomation:
                             f"{self.agent_negative_conviction_floor}% for negative positions"
                         )
                         continue
-
-                    # Q-learning: record outcome for agent-recommended full exits.
-                    # Agent recheck always exits the full position, so this is terminal.
-                    try:
-                        from ml.q_learning import get_q_learner
-                        avg_entry = holding.get("avg_entry_price", 0)
-                        pnl_pct = ((current_price - avg_entry) / avg_entry * 100) if avg_entry > 0 else 0
-                        first_buy_str = holding.get("first_buy_at", "")
-                        hold_hours = 0.0
-                        if first_buy_str:
-                            first_buy = datetime.fromisoformat(first_buy_str.replace("Z", "+00:00"))
-                            hold_hours = (datetime.now(first_buy.tzinfo) - first_buy).total_seconds() / 3600
-                        get_q_learner().record_outcome(
-                            symbol=symbol,
-                            coin_data=holding,
-                            action="buy",
-                            pnl_pct=pnl_pct,
-                            hold_hours=hold_hours,
-                            exit_trigger="agent_recheck",
-                        )
-                    except Exception as _qe:
-                        logger.debug(f"Q-learning agent_recheck outcome failed: {_qe}")
 
                     # Skip if position is too small to meet exchange minimum
                     try:
@@ -781,8 +769,11 @@ class SellAutomation:
                 "peak_prices": self._peak_prices,
                 "last_recheck": self._last_recheck,
                 "last_recheck_conviction": self._last_recheck_conviction,
+                "last_drawdown_recheck": self._last_drawdown_recheck,
                 "tiers_taken": {k: list(v) for k, v in self._tiers_taken.items()},
                 "tightened_trailing": self._tightened_trailing,
+                "unsellable_dust": list(self._unsellable_dust),
+                "last_sanity_warn": self._last_sanity_warn,
             }
             tmp = SELL_STATE_FILE.with_suffix(".tmp")
             with open(tmp, "w") as f:
@@ -794,6 +785,26 @@ class SellAutomation:
             if tmp.exists():
                 tmp.unlink()
 
+    def _preload_unsellable_dust(self):
+        """Seed _unsellable_dust from persisted state and closed portfolio positions
+        so the startup log is suppressed for already-known dust."""
+        try:
+            if SELL_STATE_FILE.exists():
+                with open(SELL_STATE_FILE) as f:
+                    state = json.load(f)
+                self._unsellable_dust = set(state.get("unsellable_dust", []))
+        except Exception:
+            pass
+        # Also seed from portfolio: any closed position (qty=0) is unsellable by definition
+        try:
+            from ml.portfolio_tracker import get_portfolio_tracker
+            tracker = get_portfolio_tracker()
+            for sym, h in tracker.holdings.items():
+                if h.get("quantity", 0) <= 0:
+                    self._unsellable_dust.add(sym)
+        except Exception:
+            pass
+
     def _load_state(self):
         if not SELL_STATE_FILE.exists():
             return
@@ -803,10 +814,12 @@ class SellAutomation:
             self._peak_prices = state.get("peak_prices", {})
             self._last_recheck = state.get("last_recheck", {})
             self._last_recheck_conviction = state.get("last_recheck_conviction", {})
+            self._last_drawdown_recheck = state.get("last_drawdown_recheck", {})
             self._tiers_taken = {
                 k: set(v) for k, v in state.get("tiers_taken", {}).items()
             }
             self._tightened_trailing = state.get("tightened_trailing", {})
+            self._last_sanity_warn = state.get("last_sanity_warn", {})
         except Exception as e:
             logger.error(f"Failed to load sell state: {e}")
 
