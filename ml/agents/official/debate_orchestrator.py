@@ -44,6 +44,10 @@ bull_conviction — use the FULL range, do not cluster near 50:
 - 0-44: Weak — data actively contradicts a buy or only minor positives exist
 
 Focus on: breakout momentum, undervaluation vs peers, volume spikes, upcoming catalysts, low-cap asymmetry.
+Vol/MCap ratio (volume_24h / market_cap) is a KEY authenticity signal — always cite it if provided:
+- Vol/MCap > 1.0: exceptional momentum or major event, very active market — strong bullish signal
+- Vol/MCap 0.3-1.0: healthy real trading interest, not a ghost market
+- Vol/MCap < 0.05: thin market, harder to build a bull case on price action alone
 Do NOT hedge. If the data is compelling, score 75+. If it is not, score below 45. Avoid the 50-65 range unless genuinely torn.
 NOTE: The Score field is out of 10 (not 100). A score of 6/10 or above indicates a decent project. Use this as a supporting signal, not a primary argument.""",
 )
@@ -67,6 +71,11 @@ bear_conviction (strength of the case AGAINST buying) — use the FULL range:
 - 0-44: Weak bear case — risks are minor or already priced in, bull case holds up
 
 Read the bull case carefully and target its weakest claim. Look for: fading volume behind the move, project red flags (no GitHub, anonymous team, no TVL), better alternatives in same sector, thin orderbook, pump-and-dump patterns.
+Vol/MCap signal interpretation for risk assessment:
+- Vol/MCap < 0.05: ghost market — thin liquidity means high slippage, easy manipulation, weak price discovery
+- Volume divergence: if price is UP but Vol/MCap is LOW (< 0.1), the rally lacks real buying conviction — likely to fade
+- 30d trend < -25%: not a dip — structural selling pressure. Requires extraordinary catalyst to overcome
+- 30d down + Vol/MCap < 0.1: distribution phase, not accumulation. Strong bear signal.
 Do NOT hedge. If there are serious red flags, score 75+. If the bull case is genuinely strong, score below 40. Avoid clustering near 50.
 NOTE: The Score field is out of 10 (not 100). A score of 6/10 or above is decent. Do not cite a score of 7/10 as a red flag — it is above average.
 IMPORTANT: Many coins are sourced directly from exchange listings and will show "MCap: N/A (exchange-listed)" — this means CoinGecko data is unavailable, NOT that the market cap is zero. Do NOT treat missing market cap as a red flag. Evaluate on volume, price action, and exchange listing quality instead.
@@ -98,6 +107,7 @@ Verdict rules (apply in order):
 6. Existing position: HOLD bias — only should_trade=false (sell signal) if thesis clearly broken
 7. Score is out of 10. A score of 6+/10 is good. Do NOT treat a score of 7/10 as if it were 7/100.
 8. IMPORTANT: "MCap: N/A (exchange-listed)" means CoinGecko data is unavailable — NOT a red flag. Evaluate on volume and price action.
+9. STRUCTURAL DECLINE (existing positions only): If EXISTING POSITION shows P&L < -20% AND 30d price change < -25%, this is a structural decline — not a normal dip. Lower the HOLD bias: a net_edge of 3+ (bear wins) is sufficient to recommend SELL. Only override this if Vol/MCap is above 0.2 (real buying interest remains) or a concrete upcoming catalyst is cited in the bull case. "Dip buying" reasoning does not override a 30d structural decline at a loss.
 
 trade_conviction — your independent score reflecting how confident you are in the verdict:
 - 75-100: Obvious outcome, one side dominated
@@ -206,18 +216,28 @@ def _parse_json(text: str) -> Optional[Dict]:
 
 
 def _detect_regime() -> str:
-    """Detect market regime from BTC 7-day price change."""
+    """Detect market regime from BTC and ETH 7-day price changes (average)."""
     try:
         import services.app_state as state
         if state.analyzer and state.analyzer.coins:
+            btc_pct = None
+            eth_pct = None
             for coin in state.analyzer.coins:
-                if getattr(coin, "symbol", "").upper() in ("BTC", "WBTC"):
-                    pct = float(getattr(coin, "price_change_7d", 0) or 0)
-                    if pct > 10:
-                        return "bull"
-                    if pct < -10:
-                        return "bear"
-                    return "neutral"
+                sym = getattr(coin, "symbol", "").upper()
+                if sym in ("BTC", "WBTC") and btc_pct is None:
+                    btc_pct = float(getattr(coin, "price_change_7d", 0) or 0)
+                elif sym in ("ETH", "WETH") and eth_pct is None:
+                    eth_pct = float(getattr(coin, "price_change_7d", 0) or 0)
+                if btc_pct is not None and eth_pct is not None:
+                    break
+            signals = [p for p in [btc_pct, eth_pct] if p is not None]
+            if signals:
+                avg = sum(signals) / len(signals)
+                if avg > 8:
+                    return "bull"
+                if avg < -8:
+                    return "bear"
+                return "neutral"
     except Exception:
         pass
     return "neutral"

@@ -134,6 +134,9 @@ def _build_market_data_str(coin_data: Optional[Dict[str, Any]], symbol: str = ""
     else:
         mcap_str = f"£{market_cap}"
 
+    vol_24h = coin_data.get('volume_24h', 0) or 0
+    vol_mcap_ratio = (vol_24h / float(market_cap)) if market_cap and float(market_cap) > 0 and vol_24h > 0 else None
+
     lines = [
         f"Name: {coin_data.get('name', symbol)}",
         f"Price: £{coin_data.get('price', 'N/A')}",
@@ -142,6 +145,7 @@ def _build_market_data_str(coin_data: Optional[Dict[str, Any]], symbol: str = ""
         f"Rank: {'#' + str(market_cap_rank) if market_cap_rank else 'N/A (exchange-listed)'}",
         f"MCap: {mcap_str}",
         f"Vol: £{coin_data.get('volume_24h', 'N/A')}",
+        f"Vol/MCap: {vol_mcap_ratio:.2f}x" if vol_mcap_ratio is not None else "Vol/MCap: N/A",
         f"Score: {coin_data.get('attractiveness_score', 'N/A')}/10 (scale 0-10, avg 6.5)",
     ]
 

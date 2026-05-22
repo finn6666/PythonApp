@@ -44,16 +44,28 @@ PASS criteria (be generous — we want to find gems):
 - Price action showing momentum or a dip in a fundamentally strong coin
 - Low cap with asymmetric upside potential
 - New coin with genuine buzz (even without track record)
+- High Vol/MCap ratio (>0.3) — real trading interest, not a ghost market
 
 SKIP criteria:
 - Dead project (no volume, no development, flatlined price)
 - Pure scam/rugpull signals (tiny mcap + no community + suspicious tokenomics)
 - Stagnant coin with no catalysts and declining volume
 - Already overextended (massive recent pump with no substance)
+- Vol/MCap < 0.05 AND negative 30d trend (< -15%): thin market + structural decline = avoid
+- Consistent 30d downtrend (< -25%) with Vol/MCap < 0.1: selling pressure not absorbed, no recovery
 
 When action is PASS, also set play_type:
 - "swing": strong short-term momentum signal (large 24h spike, volume surge) but limited fundamental story. Best held hours to a few days.
 - "accumulate": strong fundamentals, undervalued, growing ecosystem — hold weeks to months. Default if uncertain.
+
+Key signal interpretation:
+- Vol/MCap > 1.0: exceptional momentum or major event — treat as strong PASS signal
+- Vol/MCap 0.3-1.0: healthy active trading
+- Vol/MCap 0.05-0.3: average market — focus on price action
+- Vol/MCap < 0.05: ghost market — requires very strong fundamentals to PASS
+- 30d > +30%: strong trend, but check if overextended (ATH dist < -10%)
+- 30d < -25%: structural decline, not a dip — weight bear case heavily
+- ATH dist < -80%: either deeply undervalued (gem) or abandoned (dead) — check volume to distinguish
 
 Keep your reasoning to ONE sentence. Speed matters — don't overthink it.
 Remember: primary focus is low-cap gems (under £1, sub-$100M mcap) for asymmetric upside. But if a mid-cap or higher-priced coin has a legitimately strong setup — strong momentum, upcoming catalyst, clear fundamentals — do NOT skip it just because of price or market cap. A great trade is a great trade. Be biased toward finding opportunities.""",
@@ -72,6 +84,10 @@ async def quick_screen_coin(
         {"pass": bool, "confidence": int, "one_liner": str}
     """
     # Build a compact data line
+    mcap = coin_data.get('market_cap', 0) or 0
+    vol = coin_data.get('volume_24h', 0) or 0
+    vol_mcap_ratio = (vol / float(mcap)) if mcap > 0 and vol > 0 else None
+
     parts = [
         f"{coin_data.get('name', symbol)} ({symbol})",
         f"£{coin_data.get('price', '?')}",
@@ -80,7 +96,14 @@ async def quick_screen_coin(
         f"Rank: #{coin_data.get('market_cap_rank', '?')}",
         f"MCap: £{coin_data.get('market_cap', '?')}",
         f"Vol: £{coin_data.get('volume_24h', '?')}",
+        f"Vol/MCap: {vol_mcap_ratio:.2f}x" if vol_mcap_ratio is not None else "Vol/MCap: N/A",
     ]
+    p30d = coin_data.get('price_change_30d')
+    if p30d is not None:
+        parts.append(f"30d: {float(p30d):.1f}%")
+    ath = coin_data.get('ath_change_pct')
+    if ath is not None:
+        parts.append(f"ATH dist: {float(ath):.1f}%")
     gem_score = coin_data.get("gem_score")
     if gem_score is not None:
         parts.append(f"GemScore: {gem_score:.1f}")
