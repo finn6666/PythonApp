@@ -45,6 +45,7 @@ class ExchangeManager:
         self._pairs: Dict[str, set] = {}  # exchange_id → set of "BASE/QUOTE" pairs
         self._coin_exchange_map: Dict[str, List[str]] = {}  # symbol → [exchange_ids]
         self._fx_cache: Dict[str, Tuple[float, float]] = {}  # FX rate cache: key → (rate, fetched_at)
+        self._min_order_cache: Dict[str, Tuple[float, float]] = {}  # symbol → (min_gbp, fetched_at)
         self._pairs_loaded_at: float = 0.0  # epoch time of last in-memory pairs load
         self._exchange_lock = __import__('threading').Lock()  # guards _init_exchange
 
@@ -1138,7 +1139,15 @@ class ExchangeManager:
         Get the minimum order size in GBP for a symbol.
         Checks both quantity-based and cost-based minimums.
         Returns the minimum GBP needed to place an order, or 0 if unknown.
+        Results are cached for 30 minutes to avoid repeated ticker fetches.
         """
+        import time
+        cached = self._min_order_cache.get(symbol)
+        if cached:
+            min_gbp, fetched_at = cached
+            if time.time() - fetched_at < 1800:  # 30-min TTL
+                return min_gbp
+
         result = self.find_best_pair(symbol)
         if not result:
             return 0
@@ -1172,7 +1181,9 @@ class ExchangeManager:
             if min_gbp > 0:
                 min_gbp *= 1.05  # 5% buffer
 
-            return round(min_gbp, 2)
+            min_gbp = round(min_gbp, 2)
+            self._min_order_cache[symbol] = (min_gbp, time.time())
+            return min_gbp
         except Exception as e:
             logger.warning(f"Could not determine min order for {symbol}: {e}")
             return 0

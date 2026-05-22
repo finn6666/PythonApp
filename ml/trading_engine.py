@@ -436,9 +436,11 @@ class TradingEngine:
         budget.trades_proposed += 1
 
         # Send approval email only when manual approval is needed.
+        # Sent in a background thread so SMTP handshake doesn't block the trading lock.
         email_sent = False
         if not self._should_auto_approve(side, amount_gbp, trigger_type):
-            email_sent = self._send_approval_email(proposal)
+            threading.Thread(target=self._send_approval_email, args=(proposal,), daemon=True).start()
+            email_sent = True
 
         self._save_state()
 
@@ -736,12 +738,8 @@ class TradingEngine:
             # Auto-record to portfolio tracker
             self._record_to_portfolio(proposal, exchange_used, fee_gbp=fee_gbp)
 
-            # Send confirmation email
-            if not self._send_execution_email(proposal):
-                logger.warning(
-                    f"Execution email not sent for {proposal.side.upper()} {proposal.symbol} "
-                    f"— check SMTP config or logs above"
-                )
+            # Send confirmation email in background — SMTP latency must not block the trading lock.
+            threading.Thread(target=self._send_execution_email, args=(proposal,), daemon=True).start()
 
             logger.info(
                 f"TRADE EXECUTED: {proposal.side.upper()} {(proposal.quantity or 0):.6f} "
@@ -813,7 +811,7 @@ class TradingEngine:
             })
 
             # Notify by email so the user knows about the failure
-            self._send_failure_email(proposal, str(e))
+            threading.Thread(target=self._send_failure_email, args=(proposal, str(e)), daemon=True).start()
 
             return {"success": False, "error": str(e)}
 
