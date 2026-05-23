@@ -770,7 +770,6 @@ class TradingEngine:
                 recycle_min = float(os.getenv("RECYCLE_MIN_GBP", "2.00"))
                 if proposal.amount_gbp >= recycle_min:
                     try:
-                        import threading
                         from ml.scan_loop import get_scan_loop
                         threading.Thread(
                             target=get_scan_loop().run_scan,
