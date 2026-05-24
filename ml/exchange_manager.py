@@ -640,6 +640,61 @@ class ExchangeManager:
                         except Exception as fb_e:
                             logger.error(f"Fallback sell failed on {fallback_id}: {fb_e}")
                             continue
+                    # All full-qty sell attempts failed.  Last resort: split sell —
+                    # execute individually on every exchange that holds any of the
+                    # coin.  This handles positions accumulated across multiple
+                    # exchanges over time where no single exchange holds the full qty.
+                    all_sell_exchanges = [exchange_id] + remaining
+                    split_fills: List[str] = []
+                    total_filled_qty = 0.0
+                    total_filled_gbp = 0.0
+                    for split_eid in all_sell_exchanges:
+                        try:
+                            split_exc = self.get_exchange(split_eid)
+                            if not split_exc:
+                                continue
+                            split_bal = split_exc.fetch_balance()
+                            avail_base = (
+                                split_bal.get(symbol, {}).get("free", 0) or 0
+                            )
+                            if avail_base <= 0:
+                                continue
+                            split_result = self._try_order_on_exchange(
+                                split_eid, symbol, side, 0.0,
+                                quantity=avail_base,
+                            )
+                            if split_result.get("success"):
+                                split_fills.append(split_eid)
+                                filled = split_result.get("quantity", avail_base)
+                                filled_price = split_result.get("price", current_price)
+                                filled_fx = split_result.get("fx_rate", fx_rate)
+                                filled_gbp = (filled * filled_price) / filled_fx
+                                total_filled_qty += filled
+                                total_filled_gbp += filled_gbp
+                                logger.info(
+                                    f"Split sell: {filled:.6f} {symbol} on "
+                                    f"{split_eid} (£{filled_gbp:.2f})"
+                                )
+                        except Exception as se:
+                            logger.warning(
+                                f"Split sell attempt on {split_eid} failed: {se}"
+                            )
+                            continue
+                    if split_fills:
+                        return {
+                            "success": True,
+                            "exchange": split_fills[0],
+                            "pair": pair,
+                            "order_id": "split",
+                            "side": side,
+                            "quantity": total_filled_qty,
+                            "price": current_price,
+                            "amount_gbp": total_filled_gbp,
+                            "fee_gbp": 0.0,
+                            "fx_rate": fx_rate,
+                            "quote_currency": quote_currency,
+                            "split_sell_exchanges": split_fills,
+                        }
                 else:
                     # Buy: quote balance depleted on preferred exchange (e.g. USDT
                     # on KuCoin spent down by earlier trades).  Try other exchanges.
