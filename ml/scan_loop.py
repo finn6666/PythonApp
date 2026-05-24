@@ -743,6 +743,21 @@ class ScanLoop:
                 sized_pct = compute_allocation_pct(conviction, allocation_pct, coin_data)
                 amount = remaining * (sized_pct / 100)
                 amount = min(amount, remaining)
+
+                # Skip if the computed amount is below the minimum useful budget —
+                # the exchange will reject sub-minimum orders and bump logic cannot
+                # help when the remaining budget itself is too small.
+                if amount < engine.min_useful_budget_gbp:
+                    logger.info(
+                        f"[Scan] {symbol}: skipping proposal — computed amount "
+                        f"£{amount:.2f} below minimum useful £{engine.min_useful_budget_gbp:.2f}"
+                    )
+                    return {
+                        "outcome": "skipped",
+                        "proposed": False,
+                        "reason": f"Computed amount £{amount:.2f} below minimum useful budget",
+                    }
+
                 logger.info(
                     f"[Scan] {symbol}: conviction={conviction}, agent_alloc={allocation_pct:.0f}%, "
                     f"computed_alloc={sized_pct:.1f}%, amount=£{amount:.2f}"

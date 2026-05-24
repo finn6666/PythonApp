@@ -1186,6 +1186,8 @@ class ExchangeManager:
             return min_gbp
         except Exception as e:
             logger.warning(f"Could not determine min order for {symbol}: {e}")
+            # Cache the failure so repeated calls within 30 min don't re-hit the API.
+            self._min_order_cache[symbol] = (0, time.time())
             return 0
 
     def get_live_prices_gbp(self, symbols: List[str]) -> Dict[str, float]:
