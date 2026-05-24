@@ -163,6 +163,7 @@ def debug_coins():
 
 
 @health_bp.route('/api/market/state')
+@limiter.limit('60 per hour')
 def market_state():
     """Current crypto market state — Fear & Greed + news headlines + global stats"""
     try:

@@ -1063,8 +1063,12 @@ def exchange_balance():
 
 
 @trading_bp.route('/api/exchanges/check/<symbol>')
+@limiter.limit('30 per minute')
+@require_trading_auth
 def check_symbol_tradeable(symbol):
     """Check if a specific coin is tradeable and on which exchanges."""
+    if not re.match(r'^[A-Za-z0-9]{1,20}$', symbol):
+        return jsonify({'error': 'Invalid symbol'}), 400
     try:
         from ml.exchange_manager import get_exchange_manager
         mgr = get_exchange_manager()
@@ -1094,6 +1098,7 @@ def trades_page():
 # ─── Sell Automation ──────────────────────────────────────────
 
 @trading_bp.route('/api/trades/sell-automation/status')
+@require_trading_auth
 def sell_automation_status():
     """Get sell automation status and configuration."""
     try:
