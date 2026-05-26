@@ -90,6 +90,27 @@ class ScanLoop:
                     "error": f"Cooldown active — next scan in {remaining:.1f}h",
                 }
 
+        # Budget check: skip data refresh + screening when today's buy budget
+        # is already exhausted — avoids ~18 pointless CoinGecko calls per day.
+        if triggered_by == "scheduled":
+            try:
+                from ml.trading_engine import get_trading_engine as _eng
+                if _eng().is_budget_exhausted():
+                    logger.debug(
+                        "Trading budget exhausted — skipping scheduled scan until budget resets"
+                    )
+                    return {
+                        "success": True,
+                        "scan_id": None,
+                        "coins_screened": 0,
+                        "coins_analysed": 0,
+                        "proposals": 0,
+                        "errors": 0,
+                        "skipped_reason": "budget_exhausted",
+                    }
+            except Exception:
+                pass  # If engine unavailable, proceed normally
+
         self.scan_running = True
         scan_start = datetime.utcnow()
         scan_id = scan_start.strftime("%Y%m%d_%H%M%S")
