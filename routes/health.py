@@ -100,18 +100,6 @@ def api_health():
     except Exception:
         monitor_status = {'running': False}
 
-    # System metrics (lightweight — no interval sleep)
-    system_metrics = {}
-    try:
-        import psutil
-        system_metrics = {
-            'cpu_percent': psutil.cpu_percent(interval=0),
-            'memory_percent': psutil.virtual_memory().percent,
-            'disk_percent': psutil.disk_usage('/').percent,
-        }
-    except Exception:
-        pass
-
     return jsonify({
         'status': 'online',
         'timestamp': datetime.now().isoformat(),

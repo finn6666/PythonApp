@@ -2,11 +2,10 @@
 Agent analysis, portfolio, and gem score routes.
 """
 
-import os
 import logging
 from flask import Blueprint, jsonify, request
 
-from services.app_state import run_async, parse_market_cap, parse_volume, project_root
+from services.app_state import run_async, parse_market_cap, parse_volume
 import services.app_state as state
 from routes.trading import require_trading_auth
 from extensions import limiter

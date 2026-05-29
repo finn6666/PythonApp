@@ -523,9 +523,9 @@ class ScanLoop:
         # higher bar in bear markets (filter weak coins before spending API budget).
         regime = self._get_market_regime()
         regime_screen_thresholds = {
-            "bull":    int(os.getenv("SCAN_QUICK_SCREEN_BULL",    "60")),
+            "bull": int(os.getenv("SCAN_QUICK_SCREEN_BULL", "60")),
             "neutral": int(os.getenv("SCAN_QUICK_SCREEN_NEUTRAL", str(self.quick_screen_min_confidence))),
-            "bear":    int(os.getenv("SCAN_QUICK_SCREEN_BEAR",    "78")),
+            "bear": int(os.getenv("SCAN_QUICK_SCREEN_BEAR", "78")),
         }
         effective_threshold = regime_screen_thresholds.get(regime, self.quick_screen_min_confidence)
         if effective_threshold != self.quick_screen_min_confidence:

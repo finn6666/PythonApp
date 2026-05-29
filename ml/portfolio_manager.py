@@ -30,69 +30,69 @@ class PortfolioManager:
     """
     Advanced portfolio management using multi-agent analysis
     """
-    
+
     def __init__(self, orchestrator):
         """
         Initialize portfolio manager with agent orchestrator
-        
+
         Args:
             orchestrator: AgentOrchestrator instance
         """
         self.orchestrator = orchestrator
         logger.info("Portfolio Manager initialized")
-    
+
     async def analyze_portfolio(self, coins: List[Dict[str, Any]], max_coins: int = 20) -> PortfolioRecommendation:
         """
         Analyze multiple coins and generate portfolio recommendations
-        
+
         Args:
             coins: List of coin data dictionaries
             max_coins: Maximum number of coins to analyze
-            
+
         Returns:
             PortfolioRecommendation with comprehensive insights
         """
         logger.info(f"Analyzing portfolio of {len(coins)} coins (max {max_coins})")
-        
+
         # Analyze coins in parallel with rate limiting
         analysis_results = []
-        
+
         # Process in batches to avoid rate limits
         batch_size = 5
         for i in range(0, min(len(coins), max_coins), batch_size):
             batch = coins[i:i + batch_size]
-            
+
             tasks = [
                 self.orchestrator.analyze_coin(coin['symbol'], coin)
                 for coin in batch
             ]
-            
+
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-            
+
             for coin, result in zip(batch, batch_results):
                 if isinstance(result, Exception):
                     logger.warning(f"Analysis failed for {coin['symbol']}: {result}")
                     continue
-                
+
                 if result:
                     analysis_results.append({
                         'coin': coin,
                         'analysis': result
                     })
-            
+
             # Brief pause between batches
             if i + batch_size < min(len(coins), max_coins):
                 await asyncio.sleep(2)
-        
+
         # Categorize recommendations
         buy_recs = []
         hold_recs = []
         avoid_recs = []
-        
+
         for item in analysis_results:
             coin = item['coin']
             analysis = item['analysis']
-            
+
             rec_data = {
                 'symbol': coin['symbol'],
                 'name': coin.get('name', coin['symbol']),
@@ -103,19 +103,19 @@ class PortfolioManager:
                 'key_strengths': analysis.get('key_strengths', [])[:2],
                 'key_weaknesses': analysis.get('key_weaknesses', [])[:2]
             }
-            
+
             if analysis.get('recommendation') == 'BUY':
                 buy_recs.append(rec_data)
             elif analysis.get('recommendation') in ['SELL', 'AVOID']:
                 avoid_recs.append(rec_data)
             else:
                 hold_recs.append(rec_data)
-        
+
         # Sort by gem score
         buy_recs.sort(key=lambda x: x['gem_score'], reverse=True)
         hold_recs.sort(key=lambda x: x['gem_score'], reverse=True)
         avoid_recs.sort(key=lambda x: x['gem_score'])
-        
+
         # Calculate portfolio metrics
         portfolio_risk = self._calculate_portfolio_risk(analysis_results)
         diversification = self._calculate_diversification(analysis_results)
@@ -123,7 +123,7 @@ class PortfolioManager:
         top_opportunities = self._identify_top_opportunities(buy_recs)
         risk_warnings = self._generate_risk_warnings(analysis_results)
         allocation = self._generate_allocation_strategy(buy_recs)
-        
+
         recommendation = PortfolioRecommendation(
             total_gems_found=len(buy_recs),
             buy_recommendations=buy_recs,
@@ -136,30 +136,30 @@ class PortfolioManager:
             risk_warnings=risk_warnings,
             allocation_strategy=allocation
         )
-        
+
         logger.info(f"Portfolio analysis complete: {len(buy_recs)} BUY, {len(hold_recs)} HOLD, {len(avoid_recs)} AVOID")
-        
+
         return recommendation
-    
+
     def _calculate_portfolio_risk(self, results: List[Dict]) -> float:
         """Calculate overall portfolio risk score (0-100)"""
         if not results:
             return 50.0
-        
+
         risk_scores = {
             'Low': 20,
             'Medium': 50,
             'High': 80,
             'Very High': 95
         }
-        
+
         total_risk = sum(
             risk_scores.get(r['analysis'].get('risk_level', 'Medium'), 50)
             for r in results
         )
-        
+
         return total_risk / len(results)
-    
+
     def _calculate_diversification(self, results: List[Dict]) -> float:
         """
         Calculate diversification score (0-100) based on multiple factors:
@@ -218,19 +218,19 @@ class PortfolioManager:
 
         diversification = min(100, variety_score + concentration_score + risk_dist + tier_score - avoid_penalty)
         return max(0, round(diversification, 1))
-    
+
     def _determine_market_sentiment(self, results: List[Dict]) -> str:
         """Determine overall market sentiment"""
         if not results:
             return 'Neutral'
-        
+
         buy_count = sum(1 for r in results if r['analysis'].get('recommendation') == 'BUY')
         avoid_count = sum(1 for r in results if r['analysis'].get('recommendation') in ['SELL', 'AVOID'])
-        
+
         total = len(results)
         buy_ratio = buy_count / total
         avoid_ratio = avoid_count / total
-        
+
         if buy_ratio > 0.5:
             return 'Bullish'
         elif avoid_ratio > 0.5:
@@ -241,11 +241,11 @@ class PortfolioManager:
             return 'Cautiously Bearish'
         else:
             return 'Neutral'
-    
+
     def _identify_top_opportunities(self, buy_recs: List[Dict]) -> List[Dict]:
         """Identify top 3 opportunities with reasoning"""
         top_3 = buy_recs[:3]
-        
+
         opportunities = []
         for rec in top_3:
             opportunities.append({
@@ -255,45 +255,45 @@ class PortfolioManager:
                 'confidence': rec['confidence'],
                 'reason': rec['key_strengths'][0] if rec['key_strengths'] else 'Strong fundamentals'
             })
-        
+
         return opportunities
-    
+
     def _generate_risk_warnings(self, results: List[Dict]) -> List[str]:
         """Generate portfolio-level notes and considerations"""
         warnings = []
-        
+
         if not results:
             return warnings
-        
+
         # Check for high-upside concentration
         high_risk_count = sum(
-            1 for r in results 
+            1 for r in results
             if r['analysis'].get('risk_level') in ['High', 'Very High']
         )
-        
+
         if high_risk_count > len(results) * 0.4:
             warnings.append(f"Heavy moonshot exposure: {high_risk_count}/{len(results)} coins are high-upside plays — consider position sizing")
-        
+
         # Check for low confidence
         low_confidence = sum(
-            1 for r in results 
+            1 for r in results
             if r['analysis'].get('confidence', 100) < 50
         )
-        
+
         if low_confidence > len(results) * 0.3:
             warnings.append(f"Limited data on {low_confidence}/{len(results)} coins — analysis confidence below 50%")
-        
+
         # Check for market conditions
         avoid_count = sum(
-            1 for r in results 
+            1 for r in results
             if r['analysis'].get('recommendation') in ['SELL', 'AVOID']
         )
-        
+
         if avoid_count > len(results) * 0.4:
             warnings.append(f"Selective market: {avoid_count}/{len(results)} coins not showing strong setups right now")
-        
+
         return warnings
-    
+
     def _generate_allocation_strategy(self, buy_recs: List[Dict]) -> Dict[str, float]:
         """
         Generate risk-adjusted allocation percentages for top coins.

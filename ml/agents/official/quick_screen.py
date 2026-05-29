@@ -166,7 +166,8 @@ Return JSON: {{"action": "PASS"|"SKIP", "confidence": 0-100, "play_type": "accum
         # Parse JSON from response.
         # Handle markdown code fences (```json ... ```) and nested objects.
         # The old flat regex \{[^{}]*\} broke on any nested field the model returned.
-        import json, re
+        import json
+        import re
         parsed = None
         # Strip markdown code fences first
         clean = re.sub(r'```(?:json)?\s*', '', result_text).strip().strip('`').strip()

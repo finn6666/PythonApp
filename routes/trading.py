@@ -140,9 +140,9 @@ def confirm_trade(token):
         action_desc = ('Approve and execute this trade' if action == 'approve'
                        else 'Reject this trade — no money will be spent')
 
-        p_side   = _html.escape(str(proposal['side']).upper())
+        p_side = _html.escape(str(proposal['side']).upper())
         p_symbol = _html.escape(str(proposal['symbol']))
-        p_conf   = _html.escape(str(proposal['confidence']))
+        p_conf = _html.escape(str(proposal['confidence']))
         side_dot = '&#x1F7E2;' if proposal['side'] == 'buy' else '&#x1F534;'
 
         return f"""
@@ -1054,7 +1054,7 @@ def exchange_balance():
                     if free > 0.001:
                         cash[cur] = round(free, 2)
                 balances[eid] = cash
-            except Exception as e:
+            except Exception:
                 balances[eid] = {"error": "Balance unavailable"}
         return jsonify({"balances": balances}), 200
     except Exception as e:
@@ -1175,7 +1175,7 @@ def backtest_run():
         summary['trade_count'] = len(result.trades)
         summary['equity_points'] = len(result.equity_curve)
         return jsonify({'success': True, 'result': summary}), 200
-    except Exception as e:
+    except Exception:
         logger.exception("Backtest failed")
         return jsonify({'success': False, 'error': 'Backtest failed'}), 500
 
@@ -1193,8 +1193,6 @@ def backtest_results():
         return jsonify({'success': False, 'error': 'Failed to list backtest results'}), 500
 
 
-
 # ========================================
 # ML Retraining endpoints
 # ========================================
-

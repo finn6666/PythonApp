@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 # ─── Data Models ───────────────────────────────────────────────
 
+
 @dataclass
 class TradeProposal:
     """A proposed trade awaiting approval."""
