@@ -34,7 +34,7 @@ class SentimentOutput(BaseModel):
 sentiment_agent = Agent(
     name="sentiment_specialist",
     description="Cryptocurrency sentiment analyst specializing in social media analysis and market psychology",
-    model=os.getenv("SENTIMENT_AGENT_MODEL", "gemini-2.0-flash"),
+    model=os.getenv("SENTIMENT_AGENT_MODEL", "gemini-2.5-flash"),
     instruction="""You are a cryptocurrency sentiment analyst. Your analysis carries SIGNIFICANT weight — when you detect strong hype, the system will prioritise your signal over fundamentals and technicals.
 
 **Important:** The `analyze_social_sentiment` tool returns placeholder data (always 0.6 positive) — ignore it. For sentiment, rely on: (1) the Fear & Greed Index from `get_fear_greed_index` (this is real live data), (2) any news headlines you receive, and (3) your own knowledge of this coin's community and narratives.

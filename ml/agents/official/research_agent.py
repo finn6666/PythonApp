@@ -33,7 +33,7 @@ class ResearchOutput(BaseModel):
 research_agent = Agent(
     name="research_specialist",
     description="Cryptocurrency fundamental research analyst",
-    model=os.getenv("RESEARCH_AGENT_MODEL", "gemini-2.0-flash"),
+    model=os.getenv("RESEARCH_AGENT_MODEL", "gemini-2.5-flash"),
     instruction="""You are a cryptocurrency research analyst. Evaluate project fundamentals for specific coins.
 
 **Important:** The tool results for fundamentals, GitHub activity, and partnerships return placeholder data — ignore them. Base your analysis on your own knowledge of the specific coin and the market data provided in the prompt.

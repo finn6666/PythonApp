@@ -37,7 +37,7 @@ class RiskOutput(BaseModel):
 risk_agent = Agent(
     name="risk_specialist",
     description="Cryptocurrency risk management specialist focusing on position sizing, portfolio risk, and exit strategies",
-    model=os.getenv("RISK_AGENT_MODEL", "gemini-2.0-flash"),
+    model=os.getenv("RISK_AGENT_MODEL", "gemini-2.5-flash"),
     instruction="""You are a cryptocurrency risk management specialist. Give honest risk assessment for specific coins.
 
 **Important context:** The user's daily budget is ~£3. At this scale, your role is ADVISORY — flag the risks truthfully so the user is informed, but DO NOT recommend avoiding trades based on risk alone. The daily budget is small enough that missing winners hurts more than taking losses.

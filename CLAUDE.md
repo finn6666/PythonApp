@@ -37,7 +37,7 @@ AI-powered low-cap cryptocurrency analysis and automated trading system. Uses a 
 |-------|-----------|
 | Language | Python 3.13 |
 | Web | Flask + Gunicorn (1 worker, 4 gthread) |
-| AI Agents | Google ADK + `gemini-2.0-flash` (configurable via `ORCHESTRATOR_MODEL`) |
+| AI Agents | Google ADK + `gemini-2.5-flash` (configurable via `ORCHESTRATOR_MODEL`) |
 | Exchange | Kraken, Bitget, KuCoin, MEXC via ccxt — best-price routing per trade |
 | ML | scikit-learn (training), ONNX Runtime (inference), Q-learning RL |
 | Frontend | Vanilla JS + Jinja2 templates + CSS |

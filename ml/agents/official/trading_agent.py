@@ -29,7 +29,7 @@ class TradeDecision(BaseModel):
 trading_agent = Agent(
     name="trading_specialist",
     description="Cryptocurrency trade execution specialist — decides whether analysis warrants a real trade",
-    model=os.getenv("TRADING_AGENT_MODEL", "gemini-2.0-flash"),
+    model=os.getenv("TRADING_AGENT_MODEL", "gemini-2.5-flash"),
     instruction="""You are a crypto trade execution specialist. You receive analysis from the research team and decide whether it warrants spending REAL money.
 
 **Context:** The user has a small daily budget (~£3). Each trade matters but it's still low-stakes. Propose trades when you're genuinely convinced.

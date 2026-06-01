@@ -5,7 +5,7 @@ applyTo: "ml/agents/**,ml/tools/**,ml/orchestrator_wrapper.py"
 
 # AI Agents (Google ADK)
 
-3-agent sequential debate on `gemini-2.0-flash`. Replaced the 5-agent parallel chain in April 2026. Costs 3 Gemini calls per coin vs 6, allowing `SCAN_MAX_FULL_ANALYSIS` to be raised to 5. Entry point: `analyze_crypto_debate()` in `ml/agents/official/debate_orchestrator.py`.
+3-agent sequential debate on `gemini-2.5-flash`. Replaced the 5-agent parallel chain in April 2026. Costs 3 Gemini calls per coin vs 6, allowing `SCAN_MAX_FULL_ANALYSIS` to be raised to 5. Entry point: `analyze_crypto_debate()` in `ml/agents/official/debate_orchestrator.py`.
 
 ## Architecture
 
@@ -79,5 +79,5 @@ metrics = wrapper.get_metrics()
 | Var | Purpose |
 |-----|---------|
 | `GOOGLE_API_KEY` | Gemini API key (required) |
-| `ORCHESTRATOR_MODEL` | Model for all 3 debate agents (default: `gemini-2.0-flash`) |
+| `ORCHESTRATOR_MODEL` | Model for all 3 debate agents (default: `gemini-2.5-flash`) |
 | `QUICK_SCREEN_MODEL` | Model for quick-screen triage |
