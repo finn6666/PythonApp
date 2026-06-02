@@ -417,6 +417,8 @@ def auto_evaluate_trade():
         engine = get_trading_engine()
 
         data = request.json
+        if not data:
+            return jsonify({"error": "Request body must be JSON"}), 400
         symbol = data.get('symbol', '').upper()
         current_price = float(data.get('current_price', 0))
 

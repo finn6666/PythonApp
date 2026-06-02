@@ -50,7 +50,14 @@ def health_dashboard():
 @health_bp.route('/api/health')
 @limiter.exempt
 def api_health():
-    """Enhanced health check for SIEM monitoring"""
+    """Public ping — returns minimal status only. Full detail requires auth."""
+    return jsonify({'status': 'online', 'timestamp': datetime.now().isoformat()}), 200
+
+
+@health_bp.route('/api/health/detail')
+@require_trading_auth
+def api_health_detail():
+    """Authenticated health check with full operational state for SIEM monitoring"""
     # Trading engine status
     trading_status = {}
     try:
@@ -152,6 +159,7 @@ def debug_coins():
 
 @health_bp.route('/api/market/state')
 @limiter.limit('60 per hour')
+@require_trading_auth
 def market_state():
     """Current crypto market state — Fear & Greed + news headlines + global stats"""
     try:
