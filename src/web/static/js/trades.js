@@ -308,6 +308,12 @@ async function toggleKillSwitch() {
 
     if (!isHalted && !confirm('This will HALT all trading and reject pending proposals. Continue?')) return;
 
+    // If no API key stored, fall back to the PIN-based /pause page
+    if (!getApiKey()) {
+        window.location.href = '/pause';
+        return;
+    }
+
     try {
         const res = await fetch('/api/trades/kill-switch', {
             method: 'POST',
@@ -315,7 +321,10 @@ async function toggleKillSwitch() {
             body: JSON.stringify({action})
         });
         if (res.status === 401 || res.status === 403) {
-            showTradeAlert('Unauthorised — check your API key is set in browser storage', 'error');
+            // Key stored but rejected — offer the /pause page as fallback
+            if (confirm('API key rejected. Open the PIN-based pause page instead?')) {
+                window.open('/pause', '_blank');
+            }
             return;
         }
         if (!res.ok) {
