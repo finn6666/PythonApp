@@ -58,6 +58,13 @@ class ScanLoop:
         # Cost control: reuse a cached SKIP result if it's this fresh (0 = always re-analyse)
         self.analysis_reuse_hours = float(os.getenv("SCAN_ANALYSIS_REUSE_HOURS", "5"))
 
+        # Low-cap discovery: coins below this market cap get a candidate-ranking
+        # boost so they aren't drowned out by larger coins whose attractiveness
+        # scores are inflated by liquidity/momentum. Requires real trading volume
+        # (volume_24h >= 0.5% of mcap) so illiquid dead coins get no boost.
+        self.low_cap_max_mcap = float(os.getenv("SCAN_LOW_CAP_MAX_MCAP", "50000000"))
+        self.low_cap_boost = float(os.getenv("SCAN_LOW_CAP_BOOST", "1.5"))
+
         SCAN_LOGS_DIR.mkdir(parents=True, exist_ok=True)
         AUDIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -413,6 +420,23 @@ class ScanLoop:
         logger.info(f"Found {len(tradeable)} tradeable coins")
         return tradeable
 
+    def _candidate_rank(self, coin: Dict) -> float:
+        """Attractiveness score with a low-cap discovery boost.
+
+        Coins under SCAN_LOW_CAP_MAX_MCAP get up to SCAN_LOW_CAP_BOOST added,
+        scaled by how deep into low-cap territory they are (a £2M coin gets
+        nearly the full boost, a £45M coin barely any). Only applies when the
+        coin has meaningful volume relative to its cap — boosting illiquid
+        coins would just surface positions we couldn't exit.
+        """
+        score = coin.get("attractiveness_score", 0) or 0
+        mcap = coin.get("market_cap", 0) or 0
+        volume = coin.get("volume_24h", 0) or 0
+        if 0 < mcap <= self.low_cap_max_mcap and volume >= mcap * 0.005:
+            depth = 1.0 - (mcap / self.low_cap_max_mcap)
+            score += self.low_cap_boost * depth
+        return score
+
     def _select_candidates(self, tradeable_coins: List[Dict]) -> List[Dict]:
         """Step 3: Select top N candidates from tradeable coins."""
         import services.app_state as state
@@ -448,17 +472,18 @@ class ScanLoop:
             if coin["symbol"] in fav_symbols and coin["symbol"] not in recently_skipped:
                 candidates.append(coin)
 
-        # Priority 2: High attractiveness score, filtered by min_gem_score
+        # Priority 2: High attractiveness score, filtered by min_gem_score.
+        # Both the filter and the sort use the low-cap-boosted rank so very
+        # low-cap coins with decent raw scores make the cut and sort ahead of
+        # larger coins — quick-screen still gates quality afterwards.
         if len(candidates) < self.max_coins_per_scan:
             remaining = [
                 c for c in tradeable_coins
                 if c["symbol"] not in {x["symbol"] for x in candidates}
                 and c["symbol"] not in recently_skipped
-                and c.get("attractiveness_score", 0) >= self.min_gem_score
+                and self._candidate_rank(c) >= self.min_gem_score
             ]
-            remaining.sort(
-                key=lambda c: c.get("attractiveness_score", 0), reverse=True
-            )
+            remaining.sort(key=self._candidate_rank, reverse=True)
             candidates.extend(remaining)
 
         # Fallback: if fresh coins don't fill the quota, top up with the least-recently-skipped
@@ -468,9 +493,9 @@ class ScanLoop:
             fallback = [
                 c for c in tradeable_coins
                 if c["symbol"] not in seen
-                and c.get("attractiveness_score", 0) >= self.min_gem_score
+                and self._candidate_rank(c) >= self.min_gem_score
             ]
-            fallback.sort(key=lambda c: c.get("attractiveness_score", 0), reverse=True)
+            fallback.sort(key=self._candidate_rank, reverse=True)
             filled = self.max_coins_per_scan - len(candidates)
             if fallback:
                 logger.info(

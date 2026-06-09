@@ -45,7 +45,7 @@ All triggers except stop-loss respect a **72h minimum hold period**.
 
 **Strategy:** Stop-loss and trailing stop are set wide intentionally — small-cap coins routinely swing 20–40%/day. Tiered profit-taking lets winners run while banking partial gains. Agent re-analysis is the primary full-exit mechanism for fundamental deterioration.
 
-Sells require email approval by default (`SELL_REQUIRE_APPROVAL=true`). The `APPROVAL_THRESHOLD_GBP` (£50) means trades above that value always require approval regardless of `BUY_AUTO_APPROVE`.
+Sells at or below `APPROVAL_THRESHOLD_GBP` (£50) auto-execute. Above that, mechanical triggers (stop-loss, trailing stop, profit tiers) still auto-execute up to `MECHANICAL_AUTO_APPROVE_MAX_GBP` (£100); discretionary sells (agent_recheck, stagnation_exit) require email approval when `SELL_REQUIRE_APPROVAL=true`. Buys above the threshold always require approval regardless of `BUY_AUTO_APPROVE`.
 
 ## ExchangeManager Routing
 
@@ -60,10 +60,11 @@ Sells require email approval by default (`SELL_REQUIRE_APPROVAL=true`). The `APP
 |-----|---------|---------|
 | `DAILY_TRADE_BUDGET_GBP` | `3.00` | Max daily buy spend |
 | `MAX_TRADE_PCT` | `50` | Max single trade as % of daily budget |
-| `APPROVAL_THRESHOLD_GBP` | `50.0` | Trades above this always require email approval |
+| `APPROVAL_THRESHOLD_GBP` | `50.0` | Trades above this require email approval; sells at/below it auto-execute |
+| `MECHANICAL_AUTO_APPROVE_MAX_GBP` | `100.0` | Ceiling for mechanical sell triggers to auto-execute |
 | `TRADE_COOLDOWN_MIN` | `60` | Minutes between proposals per side |
 | `BUY_AUTO_APPROVE` | `true` | Buys auto-execute without email |
-| `SELL_REQUIRE_APPROVAL` | `true` | Sells always need manual approval |
+| `SELL_REQUIRE_APPROVAL` | `true` | Discretionary sells above the approval threshold need manual approval |
 | `SELL_STOP_LOSS_PCT` | `-50.0` | Stop-loss % (full exit, bypasses min hold) |
 | `SELL_TRAILING_STOP_PCT` | `45.0` | Drop-from-peak % for trailing stop |
 | `SELL_MIN_HOLD_HOURS` | `72.0` | Min hold before profit/trailing triggers |
@@ -97,5 +98,7 @@ Sells require email approval by default (`SELL_REQUIRE_APPROVAL=true`). The `APP
 - Proposals expire after 1 hour — late approval returns error
 - Balance check failure is non-blocking — order proceeds (exchange rejects if insufficient)
 - Kill switch rejects all pending proposals immediately
-- Sells **never** auto-execute regardless of `BUY_AUTO_APPROVE`
+- Sells at/below `APPROVAL_THRESHOLD_GBP` auto-execute — `SELL_REQUIRE_APPROVAL` only gates larger discretionary sells
+- Execution failures get status `failed` (refunds the reserved buy budget); `rejected` means user/system rejection before execution
+- Buy budget is reserved at approval time and reconciled to the actual filled cost after execution
 - Best-price routing fetches live ask/bid from all exchanges listing the coin at execution time — falls back to `EXCHANGE_PRIORITY` order if all price fetches fail

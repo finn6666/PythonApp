@@ -143,7 +143,7 @@ class SellAutomation:
             trigger_type = getattr(p, "trigger_type", "unknown")
             if p.status == "pending":
                 pending_sell_triggers.setdefault(sym, set()).add(trigger_type)
-            elif p.status in ("rejected", "executed") and p.created_at:
+            elif p.status in ("rejected", "failed", "executed") and p.created_at:
                 try:
                     cooldown_secs = float(os.getenv("SELL_PROPOSAL_COOLDOWN_HOURS", "4")) * 3600
                     created = datetime.fromisoformat(p.created_at)
@@ -708,9 +708,9 @@ class SellAutomation:
                                     pending_for_sym.add(p.status)
                             except Exception:
                                 pass
-                    if "pending" in pending_for_sym or "rejected" in pending_for_sym:
+                    if pending_for_sym & {"pending", "rejected", "failed"}:
                         logger.info(
-                            f"{symbol}: skipping agent_recheck sell — recent proposal still active/rejected"
+                            f"{symbol}: skipping agent_recheck sell — recent proposal still active/rejected/failed"
                         )
                         continue
 

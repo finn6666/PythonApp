@@ -127,7 +127,7 @@ Gemini is the primary cost driver. Every code change that touches agent calls, s
 | Min hold period | 72h before profit/trailing triggers |
 | Tiered exits | Tier 1: 75% profit → sell 33%; Tier 2: 150% → sell 50% of remaining |
 | Balance check | Kraken balance verified before every order |
-| Email approval | HMAC-signed links; sells always require manual approval |
+| Email approval | HMAC-signed links; sells ≤ £50 auto-execute, larger sells need approval |
 | Memory guard | systemd MemoryMax=1G, Gunicorn max_requests=500 |
 | Rate limiting | 200 req/hour (Flask-Limiter) |
 | Audit trail | `data/trades/audit_log.jsonl` + daily scan logs |
