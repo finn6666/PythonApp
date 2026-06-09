@@ -140,9 +140,9 @@ def confirm_trade(token):
         action_desc = ('Approve and execute this trade' if action == 'approve'
                        else 'Reject this trade — no money will be spent')
 
-        p_side   = _html.escape(str(proposal['side']).upper())
+        p_side = _html.escape(str(proposal['side']).upper())
         p_symbol = _html.escape(str(proposal['symbol']))
-        p_conf   = _html.escape(str(proposal['confidence']))
+        p_conf = _html.escape(str(proposal['confidence']))
         side_dot = '&#x1F7E2;' if proposal['side'] == 'buy' else '&#x1F534;'
 
         return f"""
@@ -402,6 +402,156 @@ def toggle_kill_switch():
         return jsonify({"error": "Failed to toggle kill switch"}), 500
 
 
+@trading_bp.route('/pause', methods=['GET', 'POST'])
+@limiter.limit('5 per minute')
+def pause_trading():
+    """
+    PIN-gated emergency pause page — bookmarkable on phone/Mac.
+    Requires PAUSE_PIN env var. No API key needed.
+
+    GET  — Show current trading state + PIN form.
+    POST — Verify PIN, then toggle kill switch.
+    """
+    pause_pin = os.environ.get('PAUSE_PIN', '')
+    if not pause_pin:
+        return _pause_page(
+            state_label='UNKNOWN',
+            is_halted=False,
+            message='PAUSE_PIN is not configured in .env — feature disabled.',
+            message_ok=False,
+            csrf_nonce='',
+        ), 503
+
+    from ml.trading_engine import get_trading_engine
+
+    def _get_halted() -> bool:
+        try:
+            return get_trading_engine().get_status().get('kill_switch', False)
+        except Exception:
+            return False
+
+    if request.method == 'GET':
+        is_halted = _get_halted()
+        csrf_nonce = secrets.token_hex(32)
+        session['pause_csrf'] = csrf_nonce
+        return _pause_page(is_halted=is_halted, csrf_nonce=csrf_nonce)
+
+    # ── POST ──────────────────────────────────────────────────
+    # CSRF check
+    expected_nonce = session.pop('pause_csrf', None)
+    submitted_nonce = request.form.get('csrf_nonce', '')
+    if not expected_nonce or not hmac.compare_digest(expected_nonce, submitted_nonce):
+        csrf_nonce = secrets.token_hex(32)
+        session['pause_csrf'] = csrf_nonce
+        return _pause_page(
+            is_halted=_get_halted(), csrf_nonce=csrf_nonce,
+            message='Invalid request — please try again.', message_ok=False,
+        ), 403
+
+    # PIN check
+    submitted_pin = request.form.get('pin', '')
+    if not submitted_pin or not hmac.compare_digest(submitted_pin, pause_pin):
+        logger.warning(f'Pause page — wrong PIN from {request.remote_addr}')
+        csrf_nonce = secrets.token_hex(32)
+        session['pause_csrf'] = csrf_nonce
+        return _pause_page(
+            is_halted=_get_halted(), csrf_nonce=csrf_nonce,
+            message='Incorrect PIN.', message_ok=False,
+        ), 403
+
+    # Toggle
+    action = request.form.get('action', 'pause')
+    try:
+        engine = get_trading_engine()
+        if action == 'resume':
+            engine.deactivate_kill_switch()
+            is_halted = False
+            msg = 'Trading resumed.'
+            msg_ok = True
+        else:
+            engine.activate_kill_switch()
+            is_halted = True
+            msg = 'Trading PAUSED — all new proposals blocked.'
+            msg_ok = False
+        logger.info(f'Pause page — trading {"paused" if is_halted else "resumed"} via PIN from {request.remote_addr}')
+    except Exception as e:
+        logger.error(f'Pause page — engine error: {e}')
+        is_halted = _get_halted()
+        msg = 'Something went wrong — please check the dashboard.'
+        msg_ok = False
+
+    csrf_nonce = secrets.token_hex(32)
+    session['pause_csrf'] = csrf_nonce
+    return _pause_page(is_halted=is_halted, csrf_nonce=csrf_nonce, message=msg, message_ok=msg_ok)
+
+
+def _pause_page(
+    is_halted: bool = False,
+    csrf_nonce: str = '',
+    message: str = '',
+    message_ok: bool = True,
+    state_label: str = None,
+) -> str:
+    """Render the standalone pause/resume page."""
+    if state_label is None:
+        state_label = 'PAUSED' if is_halted else 'ACTIVE'
+
+    state_colour = '#e53e3e' if is_halted else '#38a169'
+    btn_label = 'Resume Trading' if is_halted else 'Pause Trading'
+    btn_colour = '#38a169' if is_halted else '#e53e3e'
+    action_value = 'resume' if is_halted else 'pause'
+
+    msg_html = ''
+    if message:
+        msg_colour = '#48bb78' if message_ok else '#fc8181'
+        msg_html = f'<p style="color:{msg_colour};margin:0 0 16px;font-size:14px;">{_html.escape(message)}</p>'
+
+    safe_nonce = _html.escape(csrf_nonce)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trading Pause — CryptoApp</title>
+</head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+             background:#0d0d14;color:#e2e8f0;margin:0;
+             display:flex;justify-content:center;align-items:center;min-height:100vh;">
+  <div style="background:#151520;padding:36px 32px;border-radius:16px;
+              border:1px solid #2d3748;width:100%;max-width:360px;box-sizing:border-box;">
+    <h1 style="margin:0 0 4px;font-size:18px;font-weight:700;color:#e2e8f0;">CryptoApp</h1>
+    <p style="margin:0 0 24px;font-size:13px;color:#718096;">Trading control</p>
+
+    <div style="background:#1a1a2e;border-radius:10px;padding:16px 20px;margin-bottom:24px;
+                border-left:4px solid {state_colour};">
+      <div style="font-size:12px;color:#718096;margin-bottom:4px;">Current state</div>
+      <div style="font-size:22px;font-weight:800;color:{state_colour};">{_html.escape(state_label)}</div>
+    </div>
+
+    {msg_html}
+
+    <form method="POST">
+      <input type="hidden" name="csrf_nonce" value="{safe_nonce}">
+      <input type="hidden" name="action" value="{action_value}">
+      <label style="display:block;font-size:13px;color:#a0aec0;margin-bottom:6px;">PIN</label>
+      <input type="password" name="pin" autocomplete="current-password"
+             placeholder="Enter pause PIN"
+             style="width:100%;padding:10px 12px;background:#0d0d14;color:#e2e8f0;
+                    border:1px solid #4a5568;border-radius:8px;font-size:15px;
+                    box-sizing:border-box;margin-bottom:14px;">
+      <button type="submit"
+              style="width:100%;padding:13px;background:{btn_colour};color:#fff;
+                     border:none;border-radius:8px;font-size:15px;font-weight:700;
+                     cursor:pointer;letter-spacing:0.3px;">
+        {_html.escape(btn_label)}
+      </button>
+    </form>
+  </div>
+</body>
+</html>"""
+
+
 @trading_bp.route('/api/trades/auto-evaluate', methods=['POST'])
 @limiter.limit('10 per hour')
 @require_trading_auth
@@ -417,6 +567,8 @@ def auto_evaluate_trade():
         engine = get_trading_engine()
 
         data = request.json
+        if not data:
+            return jsonify({"error": "Request body must be JSON"}), 400
         symbol = data.get('symbol', '').upper()
         current_price = float(data.get('current_price', 0))
 
@@ -1054,7 +1206,7 @@ def exchange_balance():
                     if free > 0.001:
                         cash[cur] = round(free, 2)
                 balances[eid] = cash
-            except Exception as e:
+            except Exception:
                 balances[eid] = {"error": "Balance unavailable"}
         return jsonify({"balances": balances}), 200
     except Exception as e:
@@ -1063,8 +1215,12 @@ def exchange_balance():
 
 
 @trading_bp.route('/api/exchanges/check/<symbol>')
+@limiter.limit('30 per minute')
+@require_trading_auth
 def check_symbol_tradeable(symbol):
     """Check if a specific coin is tradeable and on which exchanges."""
+    if not re.match(r'^[A-Za-z0-9]{1,20}$', symbol):
+        return jsonify({'error': 'Invalid symbol'}), 400
     try:
         from ml.exchange_manager import get_exchange_manager
         mgr = get_exchange_manager()
@@ -1094,6 +1250,7 @@ def trades_page():
 # ─── Sell Automation ──────────────────────────────────────────
 
 @trading_bp.route('/api/trades/sell-automation/status')
+@require_trading_auth
 def sell_automation_status():
     """Get sell automation status and configuration."""
     try:
@@ -1170,7 +1327,7 @@ def backtest_run():
         summary['trade_count'] = len(result.trades)
         summary['equity_points'] = len(result.equity_curve)
         return jsonify({'success': True, 'result': summary}), 200
-    except Exception as e:
+    except Exception:
         logger.exception("Backtest failed")
         return jsonify({'success': False, 'error': 'Backtest failed'}), 500
 
@@ -1188,8 +1345,6 @@ def backtest_results():
         return jsonify({'success': False, 'error': 'Failed to list backtest results'}), 500
 
 
-
 # ========================================
 # ML Retraining endpoints
 # ========================================
-

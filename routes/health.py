@@ -50,7 +50,14 @@ def health_dashboard():
 @health_bp.route('/api/health')
 @limiter.exempt
 def api_health():
-    """Enhanced health check for SIEM monitoring"""
+    """Public ping — returns minimal status only. Full detail requires auth."""
+    return jsonify({'status': 'online', 'timestamp': datetime.now().isoformat()}), 200
+
+
+@health_bp.route('/api/health/detail')
+@require_trading_auth
+def api_health_detail():
+    """Authenticated health check with full operational state for SIEM monitoring"""
     # Trading engine status
     trading_status = {}
     try:
@@ -99,18 +106,6 @@ def api_health():
             }
     except Exception:
         monitor_status = {'running': False}
-
-    # System metrics (lightweight — no interval sleep)
-    system_metrics = {}
-    try:
-        import psutil
-        system_metrics = {
-            'cpu_percent': psutil.cpu_percent(interval=0),
-            'memory_percent': psutil.virtual_memory().percent,
-            'disk_percent': psutil.disk_usage('/').percent,
-        }
-    except Exception:
-        pass
 
     return jsonify({
         'status': 'online',
@@ -163,6 +158,8 @@ def debug_coins():
 
 
 @health_bp.route('/api/market/state')
+@limiter.limit('60 per hour')
+@require_trading_auth
 def market_state():
     """Current crypto market state — Fear & Greed + news headlines + global stats"""
     try:

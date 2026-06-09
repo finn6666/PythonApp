@@ -20,7 +20,7 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-_DEBATE_MODEL = os.getenv("DEBATE_AGENT_MODEL", os.getenv("ORCHESTRATOR_MODEL", "gemini-2.0-flash"))
+_DEBATE_MODEL = os.getenv("DEBATE_AGENT_MODEL", os.getenv("ORCHESTRATOR_MODEL", "gemini-2.5-flash"))
 
 
 # ─── Agent Definitions ────────────────────────────────────────

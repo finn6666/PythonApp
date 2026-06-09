@@ -244,7 +244,7 @@ class SellAutomation:
                             amount_gbp = current_price * quantity
                             trigger["sell_fraction"] = 1.0
                             trigger["reason"] += (
-                                f" (escalated to full sell -- remainder would be unsellable dust)"
+                                " (escalated to full sell -- remainder would be unsellable dust)"
                             )
                     except Exception:
                         pass

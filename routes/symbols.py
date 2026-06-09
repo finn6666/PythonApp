@@ -40,7 +40,7 @@ def search_symbols():
         return jsonify({'success': False, 'error': 'Symbol search service not available'}), 503
     try:
         query = request.args.get('q', '').strip()
-        limit = int(request.args.get('limit', 10))
+        limit = min(int(request.args.get('limit', 10)), 100)
         if not query:
             return jsonify({'success': False, 'error': 'Query parameter "q" is required'}), 400
         results = run_async(state.data_pipeline.search_symbols(query, limit))
@@ -99,6 +99,7 @@ def add_symbol():
 
 
 @symbols_bp.route('/api/symbols', methods=['GET'])
+@limiter.limit('60 per hour')
 def get_supported_symbols():
     if not state.SYMBOLS_AVAILABLE or not state.data_pipeline:
         return jsonify({'success': False, 'error': 'Symbol service not available'}), 503
@@ -111,6 +112,7 @@ def get_supported_symbols():
 
 
 @symbols_bp.route('/api/symbols/status', methods=['GET'])
+@limiter.limit('60 per hour')
 def get_symbols_status():
     return jsonify({
         'symbols_available': state.SYMBOLS_AVAILABLE,

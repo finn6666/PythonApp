@@ -164,8 +164,6 @@ def calculate_indicators(symbol: str, indicators: List[str]) -> Dict[str, Any]:
         }
 
     closes = np.array([c[4] for c in candles], dtype=float)
-    highs = np.array([c[2] for c in candles], dtype=float)
-    lows = np.array([c[3] for c in candles], dtype=float)
 
     results = {}
     signals = []  # +1 bullish, -1 bearish per indicator

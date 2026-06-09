@@ -64,7 +64,6 @@ def _run_ml_fallback(coin, coin_data_out):
     return False
 
 
-
 # ─── Routes ───────────────────────────────────────────────────
 
 @coins_bp.route('/api/refresh', methods=['POST'])
@@ -140,6 +139,3 @@ def get_market_conditions():
     except Exception as e:
         logger.error(f"Market conditions error: {e}")
         return jsonify({'error': 'Failed to load market conditions', 'risk_level': 'UNKNOWN', 'risk_score': 50, 'risk_percentage': 50}), 500
-
-
-

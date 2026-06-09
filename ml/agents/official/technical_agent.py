@@ -35,7 +35,7 @@ class TechnicalOutput(BaseModel):
 technical_agent = Agent(
     name="technical_specialist",
     description="Cryptocurrency technical analyst",
-    model=os.getenv("TECHNICAL_AGENT_MODEL", "gemini-2.0-flash"),
+    model=os.getenv("TECHNICAL_AGENT_MODEL", "gemini-2.5-flash"),
     instruction="""You are a cryptocurrency technical analyst. Assess price action for specific coins.
 
 **Important:** The support/resistance and chart pattern tools return placeholder data (fixed levels like 0.95/1.05 regardless of the coin's real price) — ignore them. Calculate all levels yourself from the actual price data in the prompt.

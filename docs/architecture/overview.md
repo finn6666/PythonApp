@@ -55,7 +55,6 @@ For current thresholds, env vars, and implementation details, see the [instructi
 | MarketMonitor | Between-scan price checks, momentum alerts, opportunistic buys | `ml/market_monitor.py` |
 | ADK Agents | 3-agent debate (bull/bear/referee) for trade decisions | `ml/agents/official/debate_orchestrator.py` |
 | Quick Screen | Single-call triage filter before full debate | `ml/agents/official/quick_screen.py` |
-| Q-Learning | Reinforcement learning to adjust buy/skip decisions over time | `ml/q_learning.py` |
 | Trading Engine | Proposals, budget enforcement, approval flow, execution | `ml/trading_engine.py` |
 | Sell Automation | Exit triggers (stop-loss, tiered profit, trailing stop, agent recheck) | `ml/sell_automation.py` |
 | Exchange Manager | Multi-exchange routing, pair cache, FX conversion | `ml/exchange_manager.py` |

@@ -1,4 +1,4 @@
-// Server Health Page — polls /api/health every 10s
+// Server Health Page — polls /api/health/detail every 10s
 
 let healthInterval = null;
 
@@ -121,7 +121,7 @@ function renderHealthPage(data) {
 async function fetchHealth() {
     const indicator = document.getElementById('pollIndicator');
     try {
-        const resp = await fetch('/api/health');
+        const resp = await fetch('/api/health/detail');
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         renderHealthPage(data);

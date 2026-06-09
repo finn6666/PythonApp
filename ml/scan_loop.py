@@ -90,6 +90,27 @@ class ScanLoop:
                     "error": f"Cooldown active — next scan in {remaining:.1f}h",
                 }
 
+        # Budget check: skip data refresh + screening when today's buy budget
+        # is already exhausted — avoids ~18 pointless CoinGecko calls per day.
+        if triggered_by == "scheduled":
+            try:
+                from ml.trading_engine import get_trading_engine as _eng
+                if _eng().is_budget_exhausted():
+                    logger.debug(
+                        "Trading budget exhausted — skipping scheduled scan until budget resets"
+                    )
+                    return {
+                        "success": True,
+                        "scan_id": None,
+                        "coins_screened": 0,
+                        "coins_analysed": 0,
+                        "proposals": 0,
+                        "errors": 0,
+                        "skipped_reason": "budget_exhausted",
+                    }
+            except Exception:
+                pass  # If engine unavailable, proceed normally
+
         self.scan_running = True
         scan_start = datetime.utcnow()
         scan_id = scan_start.strftime("%Y%m%d_%H%M%S")
@@ -502,9 +523,9 @@ class ScanLoop:
         # higher bar in bear markets (filter weak coins before spending API budget).
         regime = self._get_market_regime()
         regime_screen_thresholds = {
-            "bull":    int(os.getenv("SCAN_QUICK_SCREEN_BULL",    "60")),
+            "bull": int(os.getenv("SCAN_QUICK_SCREEN_BULL", "60")),
             "neutral": int(os.getenv("SCAN_QUICK_SCREEN_NEUTRAL", str(self.quick_screen_min_confidence))),
-            "bear":    int(os.getenv("SCAN_QUICK_SCREEN_BEAR",    "78")),
+            "bear": int(os.getenv("SCAN_QUICK_SCREEN_BEAR", "78")),
         }
         effective_threshold = regime_screen_thresholds.get(regime, self.quick_screen_min_confidence)
         if effective_threshold != self.quick_screen_min_confidence:
@@ -743,6 +764,21 @@ class ScanLoop:
                 sized_pct = compute_allocation_pct(conviction, allocation_pct, coin_data)
                 amount = remaining * (sized_pct / 100)
                 amount = min(amount, remaining)
+
+                # Skip if the computed amount is below the minimum useful budget —
+                # the exchange will reject sub-minimum orders and bump logic cannot
+                # help when the remaining budget itself is too small.
+                if amount < engine.min_useful_budget_gbp:
+                    logger.info(
+                        f"[Scan] {symbol}: skipping proposal — computed amount "
+                        f"£{amount:.2f} below minimum useful £{engine.min_useful_budget_gbp:.2f}"
+                    )
+                    return {
+                        "outcome": "skipped",
+                        "proposed": False,
+                        "reason": f"Computed amount £{amount:.2f} below minimum useful budget",
+                    }
+
                 logger.info(
                     f"[Scan] {symbol}: conviction={conviction}, agent_alloc={allocation_pct:.0f}%, "
                     f"computed_alloc={sized_pct:.1f}%, amount=£{amount:.2f}"
